@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Only the OPAP commands needed by the main window",
+  "windows": ["main"],
+  "permissions": [
+    "allow-about",
+    "allow-app-bootstrap",
+    "allow-profile-list",
+    "allow-profile-create",
+    "allow-source-select",
+    "allow-import-prepare",
+    "allow-import-jobs",
+    "allow-import-cancel"
+  ]
+}

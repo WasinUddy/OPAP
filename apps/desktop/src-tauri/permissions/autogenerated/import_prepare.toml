@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-import-prepare"
+description = "Enables the import_prepare command without any pre-configured scope."
+commands.allow = ["import_prepare"]
+
+[[permission]]
+identifier = "deny-import-prepare"
+description = "Denies the import_prepare command without any pre-configured scope."
+commands.deny = ["import_prepare"]

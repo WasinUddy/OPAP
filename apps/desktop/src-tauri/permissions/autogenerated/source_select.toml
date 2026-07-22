@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-source-select"
+description = "Enables the source_select command without any pre-configured scope."
+commands.allow = ["source_select"]
+
+[[permission]]
+identifier = "deny-source-select"
+description = "Denies the source_select command without any pre-configured scope."
+commands.deny = ["source_select"]

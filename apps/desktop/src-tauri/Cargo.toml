@@ -1,0 +1,33 @@
+[package]
+name = "opap-desktop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-only"
+description = "Native Tauri host for the OPAP desktop application"
+repository = "https://github.com/WasinUddy/OPAP"
+
+[lib]
+name = "opap_desktop_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+opap-service = { path = "../../../crates/opap-service", version = "=0.1.0" }
+serde = { version = "1.0", features = ["derive"] }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+serde_json = "1.0"
+tauri = { version = "2", features = ["test"] }
+tempfile = "3.20"
+
+# Keep the platform-heavy Tauri graph isolated from the root workspace and pin
+# it with this host's standalone lockfile. Dedicated native-host CI checks it.
+[workspace]
