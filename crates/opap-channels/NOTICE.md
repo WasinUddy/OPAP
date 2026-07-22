@@ -1,17 +1,17 @@
 # Notices
 
-Compatibility metadata in `opap-channels` is derived from OSCAR-SQL at commit
-`3741e5b423e4b5796c51a9d447e83b2525963d50`.
+Compatibility metadata in `opap-channels` is derived from OSCAR-code at commit
+`64c5e90a26f91fb15868bcfcccde0c1e1522ac86`.
 
 OSCAR source notices preserved from the referenced files:
 
-> Copyright (c) 2019-2026 The OSCAR Team
+> Copyright (c) 2019-2025 The OSCAR Team
 >
-> Copyright (C) 2011-2018 Mark Watkins
+> Copyright (c) 2011-2018 Mark Watkins
 
-OSCAR-SQL and this derivative implementation are licensed under the GNU General
-Public License version 3. See the repository's `COPYING` file for the complete
-license text.
+OSCAR-code and this derivative implementation are licensed under the GNU
+General Public License version 3. See the repository's `COPYING` file for the
+complete license text.
 
 OPAP Rust implementation:
 

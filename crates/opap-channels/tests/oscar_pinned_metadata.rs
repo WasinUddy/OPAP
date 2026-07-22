@@ -3,9 +3,12 @@ use opap_channels::{
     ResmedFileKind, Unit, by_stable_key, resmed_signal,
 };
 
-// Source-derived fields are compatibility expectations copied from OSCAR-SQL
-// commit 3741e5b423e4b5796c51a9d447e83b2525963d50. OPAP-created keys, labels,
-// kinds, and roles are locked alongside them. See OSCAR_PROVENANCE.md.
+// The legacy fields and ResMed aliases in this hand-maintained metadata
+// snapshot were transcribed from OSCAR-code commit
+// 64c5e90a26f91fb15868bcfcccde0c1e1522ac86. This is a source-derived
+// regression check, not an executable OSCAR fixture or an end-to-end parity
+// claim. OPAP-created keys, labels, kinds, and roles are locked alongside the
+// source-derived fields. See OSCAR_PROVENANCE.md.
 #[derive(Debug)]
 struct ExpectedChannel {
     key: &'static str,
@@ -149,21 +152,6 @@ const EXPECTED_CHANNELS: &[ExpectedChannel] = &[
         &[(ResmedFileKind::Eve, &["Apnea"])],
         EVE_EVENT,
         Some(AnalyticsRole::AhiEventCount)
-    ),
-    expected_channel!(
-        "pap.series.alveolar_minute_ventilation",
-        "Alveolar minute ventilation",
-        ChannelKind::SampledSeries,
-        Unit::LitersPerMinute,
-        0xe218,
-        "RMVENT_AlvMinVent",
-        "RMVENT_AlvMinVent",
-        "Alv. Min. Vent.",
-        "Alv MV",
-        "L/min",
-        &[(ResmedFileKind::Pld, &["AlvMinVent.2s"])],
-        None,
-        None
     ),
     expected_channel!(
         "pap.series.epap",
@@ -389,36 +377,6 @@ const EXPECTED_CHANNELS: &[ExpectedChannel] = &[
         None
     ),
     expected_channel!(
-        "pap.series.spontaneous_cycle_percent",
-        "Spontaneous cycle percentage",
-        ChannelKind::SampledSeries,
-        Unit::Percent,
-        0xe219,
-        "RMVENT_SpontCyc",
-        "RMVENT_SpontCyc",
-        "Spont. Cycle%",
-        "Spont Cyc%",
-        "%",
-        &[(ResmedFileKind::Pld, &["CLRatio.2s"])],
-        None,
-        None
-    ),
-    expected_channel!(
-        "pap.series.spontaneous_trigger_percent",
-        "Spontaneous trigger percentage",
-        ChannelKind::SampledSeries,
-        Unit::Percent,
-        0xe21a,
-        "RMVENT_SpontTrig",
-        "RMVENT_SpontTrig",
-        "Spont. Trig%",
-        "Spont Trig%",
-        "%",
-        &[(ResmedFileKind::Pld, &["TRRatio.2s"])],
-        None,
-        None
-    ),
-    expected_channel!(
         "pap.series.target_minute_ventilation",
         "Target minute ventilation",
         ChannelKind::SampledSeries,
@@ -466,7 +424,7 @@ const EXPECTED_CHANNELS: &[ExpectedChannel] = &[
 ];
 
 #[test]
-fn exhaustive_registry_matches_pinned_oscar_fixture() {
+fn exhaustive_registry_matches_pinned_source_metadata_snapshot() {
     assert_eq!(CHANNELS.len(), EXPECTED_CHANNELS.len());
 
     for (channel, expected) in CHANNELS.iter().zip(EXPECTED_CHANNELS) {
@@ -558,7 +516,7 @@ fn resmed_eve_aliases_and_payload_semantics_match_loader() {
 }
 
 #[test]
-fn representative_brp_and_pld_aliases_match_translation_map() {
+fn representative_brp_and_pld_aliases_match_source_translation_map() {
     let cases = [
         (ResmedFileKind::Brp, "Flow.40ms", "pap.series.flow_rate"),
         (
@@ -584,16 +542,6 @@ fn representative_brp_and_pld_aliases_match_translation_map() {
             "FlowLim.2s",
             "pap.series.flow_limitation",
         ),
-        (
-            ResmedFileKind::Pld,
-            "AlvMinVent.2s",
-            "pap.series.alveolar_minute_ventilation",
-        ),
-        (
-            ResmedFileKind::Pld,
-            "TRRatio.2s",
-            "pap.series.spontaneous_trigger_percent",
-        ),
     ];
 
     for (file, alias, key) in cases {
@@ -604,6 +552,13 @@ fn representative_brp_and_pld_aliases_match_translation_map() {
                 .as_str(),
             key
         );
+    }
+}
+
+#[test]
+fn source_skipped_pld_signals_are_not_registered_as_channels() {
+    for alias in ["AlvMinVent.2s", "CLRatio.2s", "TRRatio.2s"] {
+        assert_eq!(resmed_signal(ResmedFileKind::Pld, alias), None, "{alias}");
     }
 }
 

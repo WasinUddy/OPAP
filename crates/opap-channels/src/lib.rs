@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// Compatibility metadata in this crate is derived from OSCAR-SQL:
-// Copyright (c) 2019-2026 The OSCAR Team
-// Copyright (C) 2011-2018 Mark Watkins
+// Compatibility metadata in this crate is derived from OSCAR-code at commit
+// 64c5e90a26f91fb15868bcfcccde0c1e1522ac86:
+// Copyright (c) 2019-2025 The OSCAR Team
+// Copyright (c) 2011-2018 Mark Watkins
 //
 // OPAP Rust implementation:
 // Copyright (c) 2026 OPAP contributors

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// The compatibility values below are derived from OSCAR-SQL at commit
-// 3741e5b423e4b5796c51a9d447e83b2525963d50.
-// Copyright (c) 2019-2026 The OSCAR Team
-// Copyright (C) 2011-2018 Mark Watkins
+// The compatibility values below are derived from OSCAR-code at commit
+// 64c5e90a26f91fb15868bcfcccde0c1e1522ac86.
+// Copyright (c) 2019-2025 The OSCAR Team
+// Copyright (c) 2011-2018 Mark Watkins
 
 use crate::{
     AnalyticsRole, ChannelDefinition, ChannelKind, EventPayload, EventSemantics, EventTimestamp,
@@ -144,26 +144,6 @@ pub static CHANNELS: &[ChannelDefinition] = &[
         }],
         event_semantics: Some(RESMED_EVE_EVENT),
         analytics_role: Some(AnalyticsRole::AhiEventCount),
-    },
-    ChannelDefinition {
-        key: StableChannelKey::new("pap.series.alveolar_minute_ventilation"),
-        label: "Alveolar minute ventilation",
-        kind: ChannelKind::SampledSeries,
-        unit: Unit::LitersPerMinute,
-        legacy_oscar: LegacyOscarMetadata {
-            id: LegacyOscarChannelId(0xe218),
-            cpp_symbol: "RMVENT_AlvMinVent",
-            lookup_code: "RMVENT_AlvMinVent",
-            english_label: "Alv. Min. Vent.",
-            short_label: "Alv MV",
-            unit_label: "L/min",
-        },
-        resmed_signals: &[ResmedSignalDescriptor {
-            file: ResmedFileKind::Pld,
-            aliases: &["AlvMinVent.2s"],
-        }],
-        event_semantics: None,
-        analytics_role: None,
     },
     ChannelDefinition {
         key: StableChannelKey::new("pap.series.epap"),
@@ -440,46 +420,6 @@ pub static CHANNELS: &[ChannelDefinition] = &[
         resmed_signals: &[ResmedSignalDescriptor {
             file: ResmedFileKind::Pld,
             aliases: &["Snore", "Snore.2s"],
-        }],
-        event_semantics: None,
-        analytics_role: None,
-    },
-    ChannelDefinition {
-        key: StableChannelKey::new("pap.series.spontaneous_cycle_percent"),
-        label: "Spontaneous cycle percentage",
-        kind: ChannelKind::SampledSeries,
-        unit: Unit::Percent,
-        legacy_oscar: LegacyOscarMetadata {
-            id: LegacyOscarChannelId(0xe219),
-            cpp_symbol: "RMVENT_SpontCyc",
-            lookup_code: "RMVENT_SpontCyc",
-            english_label: "Spont. Cycle%",
-            short_label: "Spont Cyc%",
-            unit_label: "%",
-        },
-        resmed_signals: &[ResmedSignalDescriptor {
-            file: ResmedFileKind::Pld,
-            aliases: &["CLRatio.2s"],
-        }],
-        event_semantics: None,
-        analytics_role: None,
-    },
-    ChannelDefinition {
-        key: StableChannelKey::new("pap.series.spontaneous_trigger_percent"),
-        label: "Spontaneous trigger percentage",
-        kind: ChannelKind::SampledSeries,
-        unit: Unit::Percent,
-        legacy_oscar: LegacyOscarMetadata {
-            id: LegacyOscarChannelId(0xe21a),
-            cpp_symbol: "RMVENT_SpontTrig",
-            lookup_code: "RMVENT_SpontTrig",
-            english_label: "Spont. Trig%",
-            short_label: "Spont Trig%",
-            unit_label: "%",
-        },
-        resmed_signals: &[ResmedSignalDescriptor {
-            file: ResmedFileKind::Pld,
-            aliases: &["TRRatio.2s"],
         }],
         event_semantics: None,
         analytics_role: None,

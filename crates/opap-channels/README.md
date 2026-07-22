@@ -2,6 +2,8 @@
 
 `opap-channels` is OPAP's small, explicit PAP channel registry. It is pure
 Rust, `no_std` + `alloc`, serde-ready, and portable to `wasm32-unknown-unknown`.
+Its legacy metadata and ResMed alias evidence are pinned to OSCAR-code commit
+`64c5e90a26f91fb15868bcfcccde0c1e1522ac86`.
 
 The durable identity of a channel is a stable string such as
 `pap.event.obstructive_apnea` or `pap.series.leak_rate`. OSCAR numeric
@@ -31,16 +33,17 @@ assert_eq!(
 
 The registry includes only:
 
-- the five annotation types accepted by the pinned ResMed EVE loader;
+- the five PAP event annotations persisted by the pinned ResMed EVE loader;
 - the three BRP signals accepted by that loader;
 - PLD signals that the pinned loader actually persists; and
 - OSCAR's device-reported apnea compatibility channel plus pressure/leak roles
-  used by OPAP's current analytics formulas.
+  that match OPAP's current analytics inputs.
 
-The stored ResMed alias list reproduces the pinned translation table, but
-`resmed_signal` is intentionally stricter than OSCAR's loader matcher. OSCAR
-uses case-insensitive prefix matching; OPAP's canonical metadata lookup requires
-an exact, case-sensitive alias and fails closed if a mapping is ambiguous.
+The stored ResMed alias list transcribes the relevant rows from the pinned
+translation table. `resmed_signal` is intentionally stricter than OSCAR's
+loader matcher. OSCAR uses case-insensitive prefix matching; OPAP's canonical
+metadata lookup requires an exact, case-sensitive alias and fails closed if a
+mapping is ambiguous.
 File-family scope is part of an alias identity: for example, `Mask Pres` means
 the high-rate mask-pressure channel in BRP and the regular mask-pressure channel
 in PLD. Importers that need legacy permissiveness must implement and test that
@@ -59,10 +62,15 @@ an exact registry snapshot is required.
 
 ## Deliberate omissions
 
-- CSL/CSR spans, SAD oximetry, STR settings, summary-only channels, and other
-  device families are outside this crate's initial scope.
+- CSL/CSR spans, SAD/SA2 oximetry, STR settings, machine type/settings,
+  summary-only channels, and other device families are outside this crate's
+  initial scope. Clear-airway events come from EVE annotations; CSL carries
+  CSR span annotations and is not a source for clear-airway events.
 - The pinned PLD loader recognizes I:E labels but its persistence call is
   commented out; this registry therefore does not claim I:E support.
+- The loader explicitly skips `AlvMinVent.2s`, `CLRatio.2s`, and
+  `TRRatio.2s`; they are not aliases or channels in this registry. Their
+  `RMVENT` IDs from another repository are intentionally not imported here.
 - Unknown/diagnostic fields (`Va`, `RMS9_E01`, `RMS9_E02`, and CRC fields) are
   not channels here.
 - Derived AHI/RDI series are not source channels. The registry marks count

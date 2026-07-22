@@ -166,7 +166,7 @@ pub struct EventSemantics {
     pub count_each_record: bool,
 }
 
-/// A formula-level role consumed by OPAP analytics.
+/// A formula-level role intended for OPAP analytics integration.
 ///
 /// These roles describe computation inputs only. They do not encode a clinical
 /// threshold or interpretation.
