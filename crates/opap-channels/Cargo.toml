@@ -1,0 +1,25 @@
+[package]
+name = "opap-channels"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-only"
+description = "Stable, evidence-backed PAP channel metadata for OPAP"
+repository = "https://github.com/WasinUddy/OPAP"
+readme = "README.md"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0.229", default-features = false, features = ["alloc", "derive"] }
+
+[dev-dependencies]
+serde_json = "1.0.151"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

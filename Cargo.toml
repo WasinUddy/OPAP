@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/opap-analytics",
+    "crates/opap-channels",
     "crates/opap-core",
     "crates/opap-edf",
     "crates/opap-storage",
