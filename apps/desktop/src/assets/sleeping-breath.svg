@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 96" role="img" aria-labelledby="sleeping-breath-title sleeping-breath-description">
+  <title id="sleeping-breath-title">The sleeping breath</title>
+  <desc id="sleeping-breath-description">A hand-drawn crescent moon flowing into a calm breathing wave.</desc>
+  <path d="M31 21c-9 9-11 24-4 35 8 13 25 18 39 10-12 1-22-7-24-18-3-11 2-22 12-29-9-2-17-1-23 2Z" fill="#eff8ff" stroke="#2589d6" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M68 61c14 1 18-8 28-8 11 0 10 19 21 19 12 0 11-38 24-38 12 0 10 29 22 29 10 0 11-14 21-14 9 0 12 8 19 8 8 0 13-5 20-5" fill="none" stroke="#15927c" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M81 72c8 3 13 3 20 1M179 70c9 2 17 1 24-2" fill="none" stroke="#8bc8f5" stroke-width="2" stroke-linecap="round"/>
+</svg>
