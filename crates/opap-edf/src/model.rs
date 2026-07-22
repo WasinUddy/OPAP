@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // Copyright (c) 2026 OPAP contributors
-// OSCAR/SleepyHead attribution is documented in this crate's README.
+// Pinned OSCAR/SleepyHead provenance and differences are in README.md.
 
 use crate::CalibrationError;
 
@@ -34,10 +34,20 @@ pub struct EdfHeader {
 }
 
 impl EdfHeader {
+    /// True when the EDF reserved field declares continuous EDF+ data.
+    #[must_use]
+    pub fn is_continuous(&self) -> bool {
+        self.reserved.starts_with("EDF+C")
+    }
+
     /// True when the EDF reserved field declares discontinuous EDF+ data.
     #[must_use]
     pub fn is_discontinuous(&self) -> bool {
         self.reserved.starts_with("EDF+D")
+    }
+
+    pub(crate) fn is_edf_plus(&self) -> bool {
+        self.is_continuous() || self.is_discontinuous()
     }
 }
 
@@ -72,10 +82,10 @@ impl SignalHeader {
         }
     }
 
-    /// True under OSCAR's case-sensitive compatibility rule.
+    /// True under the case-sensitive rule verified in the pinned OSCAR source.
     ///
-    /// OSCAR recognizes any label containing `Annotations`; strict EDF+ uses
-    /// the exact label `EDF Annotations`.
+    /// The pinned parser recognizes any label containing `Annotations`; strict
+    /// EDF+ uses the exact label `EDF Annotations`.
     #[must_use]
     pub fn is_annotation_signal(&self) -> bool {
         self.label.contains("Annotations")
@@ -256,7 +266,10 @@ impl EdfFile {
         self.record_count
     }
 
-    /// Bytes after the declared records. OSCAR tolerates these for known counts.
+    /// Bytes after the declared records.
+    ///
+    /// Ignoring such bytes while decoding the declared count is a behavior
+    /// verified in the OSCAR source pinned in this crate's README.
     #[must_use]
     pub const fn trailing_data_bytes(&self) -> usize {
         self.trailing_data_bytes

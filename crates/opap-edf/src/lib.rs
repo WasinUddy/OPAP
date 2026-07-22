@@ -2,21 +2,25 @@
 //
 // Copyright (c) 2026 OPAP contributors
 //
-// This clean Rust implementation is informed by OSCAR's EDF parser.
-// OSCAR is copyright (c) 2019-2026 The OSCAR Team and derives from
-// SleepyHead, copyright (c) 2011-2018 Mark Watkins.
+// Selectively reimplements behavior inspected in OSCAR-code commit
+// 64c5e90a26f91fb15868bcfcccde0c1e1522ac86. The pinned edfparser files are
+// copyright (c) 2019-2025 The OSCAR Team and (c) 2011-2018 Mark Watkins.
+// Exact source URLs, hashes, and intentional differences are in README.md.
 
 //! Safe, dependency-free parsing of EDF and EDF+ data used by PAP devices.
 //!
 //! The parser accepts an in-memory byte slice so filesystem and decompression
 //! policy remain in the caller. This also keeps the crate suitable for WASM.
 //!
-//! # Conformance and OSCAR compatibility
+//! # Conformance and selective OSCAR compatibility
 //!
-//! EDF+D is parsed strictly: it requires an exact primary `EDF Annotations`
-//! signal and an empty timekeeping TAL in every record. For continuous files,
+//! EDF+C and EDF+D are parsed strictly: both require an exact primary
+//! `EDF Annotations` signal and an empty timekeeping TAL in every record. EDF+C
+//! record clocks must be contiguous. For plain EDF and compatible inputs,
 //! signal labels containing `Annotations`, trailing bytes after declared
-//! records, and lossy UTF-8 annotation text follow OSCAR compatibility behavior.
+//! records, and lossy UTF-8 annotation text are behaviors verified against the
+//! OSCAR source pinned in the crate README. This is not a claim of full parser
+//! parity.
 
 #![forbid(unsafe_code)]
 

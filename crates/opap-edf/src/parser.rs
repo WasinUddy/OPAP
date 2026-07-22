@@ -2,9 +2,12 @@
 //
 // Copyright (c) 2026 OPAP contributors
 //
-// Signal ordering, case-sensitive "Annotations" recognition, and tolerant
-// trailing-data behavior follow OSCAR's GPLv3 EDF parser. All bounds handling
-// and arithmetic are independently implemented safely in Rust.
+// Selective behavior source (not a full-parity claim): OSCAR-code
+// 64c5e90a26f91fb15868bcfcccde0c1e1522ac86, edfparser.cpp, SHA-256
+// e86ae3953dbda904d12c602a3652bf6445e9eb4cea0ea3b77af810ccaae84086.
+// Signal ordering, case-sensitive "Annotations" recognition, and declared-count
+// trailing-data tolerance were verified there. Bounds, strict validation,
+// timeline handling, and arithmetic intentionally differ; see README.md.
 
 use crate::{
     Annotation, AnnotationRecord, EdfDateTime, EdfFile, EdfHeader, ParseError, ParseErrorKind,
@@ -164,6 +167,7 @@ impl Parser {
         }
 
         let signals = parse_signal_headers(bytes, signal_count)?;
+        let is_continuous = reserved.starts_with("EDF+C");
         let is_discontinuous = reserved.starts_with("EDF+D");
         let primary_annotation_index = signals
             .iter()
@@ -182,7 +186,7 @@ impl Parser {
                 },
             ));
         }
-        if is_discontinuous && primary_annotation_index.is_none() {
+        if (is_continuous || is_discontinuous) && primary_annotation_index.is_none() {
             return Err(ParseError::new(
                 FIXED_HEADER_BYTES,
                 ParseErrorKind::MissingTimekeepingSignal,
@@ -391,6 +395,7 @@ impl Parser {
 
         let mut cursor = data_offset;
         let mut annotation_budget = AnnotationBudget::default();
+        let mut continuous_previous_onset = None;
         for record_index in 0..record_count {
             for (signal_index, signal) in header.signals.iter().enumerate() {
                 let byte_count =
@@ -415,16 +420,42 @@ impl Parser {
                             &self.limits,
                         )
                         .map_err(|error| error.signal(signal_index).record(record_index))?;
-                        if header.is_discontinuous()
-                            && primary_annotation_index == Some(signal_index)
-                            && parsed.record_onset_seconds.is_none()
-                        {
-                            return Err(ParseError::new(
-                                cursor,
-                                ParseErrorKind::MissingRecordTimekeepingOnset,
-                            )
-                            .signal(signal_index)
-                            .record(record_index));
+                        if header.is_edf_plus() && primary_annotation_index == Some(signal_index) {
+                            let Some(record_onset) = parsed.record_onset_seconds else {
+                                return Err(ParseError::new(
+                                    cursor,
+                                    ParseErrorKind::MissingRecordTimekeepingOnset,
+                                )
+                                .signal(signal_index)
+                                .record(record_index));
+                            };
+                            if record_index == 0 && !(0.0..1.0).contains(&record_onset) {
+                                return Err(ParseError::new(
+                                    cursor,
+                                    ParseErrorKind::InvalidFirstRecordTimekeepingOnset,
+                                )
+                                .signal(signal_index)
+                                .record(record_index));
+                            }
+                            if header.is_continuous() {
+                                if record_index == 0 {
+                                    continuous_previous_onset = Some(record_onset);
+                                } else {
+                                    let expected = continuous_previous_onset.unwrap_or(f64::NAN)
+                                        + header.record_duration_seconds;
+                                    if !expected.is_finite()
+                                        || !edf_time_is_close(record_onset, expected)
+                                    {
+                                        return Err(ParseError::new(
+                                            cursor,
+                                            ParseErrorKind::NonContiguousRecordTimekeepingOnset,
+                                        )
+                                        .signal(signal_index)
+                                        .record(record_index));
+                                    }
+                                    continuous_previous_onset = Some(record_onset);
+                                }
+                            }
                         }
                         records.push(AnnotationRecord {
                             record_index,
@@ -456,6 +487,12 @@ impl Parser {
             trailing_data_bytes,
         })
     }
+}
+
+fn edf_time_is_close(actual: f64, expected: f64) -> bool {
+    let scale = actual.abs().max(expected.abs()).max(1.0);
+    let tolerance = (16.0 * f64::EPSILON * scale).clamp(1e-12, 1e-6);
+    (actual - expected).abs() <= tolerance
 }
 
 fn parse_signal_headers(
@@ -736,13 +773,21 @@ fn parse_annotations(
     let mut cursor = 0usize;
     let mut tal_index = 0usize;
     while cursor < bytes.len() {
+        let padding_start = cursor;
         while bytes.get(cursor) == Some(&0) {
             cursor += 1;
         }
         if cursor == bytes.len() {
             break;
         }
+        if cursor != padding_start {
+            return Err(annotation_error(
+                base_offset + padding_start,
+                "a TAL cannot follow NUL padding",
+            ));
+        }
         let tal_start = cursor;
+        let onset_has_positive_sign = bytes[cursor] == b'+';
         let sign = match bytes[cursor] {
             b'+' => 1.0,
             b'-' => -1.0,
@@ -810,9 +855,14 @@ fn parse_annotations(
         };
 
         cursor += 1; // separator after onset or duration
-        let is_timekeeping_tal = tal_index == 0 && bytes.get(cursor) == Some(&ANNOTATION_SEPARATOR);
+        let is_timekeeping_tal = tal_index == 0
+            && tal_start == 0
+            && onset_has_positive_sign
+            && marker == ANNOTATION_SEPARATOR
+            && bytes.get(cursor) == Some(&ANNOTATION_SEPARATOR);
         let mut text_start = cursor;
         let mut terminated = false;
+        let mut saw_annotation_separator = false;
         while cursor < bytes.len() {
             match bytes[cursor] {
                 ANNOTATION_SEPARATOR => {
@@ -827,17 +877,15 @@ fn parse_annotations(
                     )?;
                     cursor += 1;
                     text_start = cursor;
+                    saw_annotation_separator = true;
                 }
                 0 => {
-                    push_annotation_text(
-                        &mut annotations,
-                        &bytes[text_start..cursor],
-                        base_offset + text_start,
-                        onset,
-                        duration_seconds,
-                        budget,
-                        limits,
-                    )?;
+                    if text_start != cursor || !saw_annotation_separator {
+                        return Err(annotation_error(
+                            base_offset + cursor,
+                            "annotation text is missing its separator",
+                        ));
+                    }
                     cursor += 1;
                     terminated = true;
                     break;
@@ -869,14 +917,20 @@ fn parse_annotation_number(
 ) -> Result<f64, ParseError> {
     let mut has_digit = false;
     let mut has_decimal_point = false;
+    let mut has_fractional_digit = false;
     for byte in bytes {
         match byte {
-            b'0'..=b'9' => has_digit = true,
+            b'0'..=b'9' => {
+                has_digit = true;
+                if has_decimal_point {
+                    has_fractional_digit = true;
+                }
+            }
             b'.' if !has_decimal_point => has_decimal_point = true,
             _ => return Err(annotation_error(offset, reason)),
         }
     }
-    if !has_digit {
+    if !has_digit || (has_decimal_point && !has_fractional_digit) {
         return Err(annotation_error(offset, reason));
     }
     let text = core::str::from_utf8(bytes).expect("ASCII is valid UTF-8");
@@ -930,8 +984,8 @@ fn push_annotation_text(
     let decoded_text = decode_lossy_utf8(text, decoded_text_bytes, text_offset)?;
     try_reserve_vec(annotations, 1, text_offset, "annotations")?;
 
-    // QString::fromUtf8, used by OSCAR, replaces invalid sequences. Preserve
-    // that compatibility while keeping fixed EDF header fields strict ASCII.
+    // QString::fromUtf8 in the pinned OSCAR parser replaces invalid annotation
+    // sequences. Preserve that specific behavior while keeping headers strict.
     annotations.push(Annotation {
         onset_seconds,
         duration_seconds,
@@ -1123,6 +1177,17 @@ mod tests {
     }
 
     #[test]
+    fn adjacent_tals_preserve_the_clock_and_decode_later_events() {
+        let bytes = b"+0\x14\x14\0+1.5\x14Hypopnea\x14\0\0";
+        let parsed = parse_test_annotations(bytes, 0).expect("adjacent TALs");
+
+        assert_eq!(parsed.record_onset_seconds, Some(0.0));
+        assert_eq!(parsed.annotations.len(), 1);
+        assert!((parsed.annotations[0].onset_seconds - 1.5).abs() < f64::EPSILON);
+        assert_eq!(parsed.annotations[0].text, "Hypopnea");
+    }
+
+    #[test]
     fn annotation_tal_rejects_unterminated_data_without_panicking() {
         let error = parse_test_annotations(b"+0\x14event", 10).expect_err("must reject truncation");
         assert_eq!(error.offset, 10);
@@ -1140,8 +1205,12 @@ mod tests {
         assert_eq!(parsed.record_onset_seconds, Some(567.25));
         assert!(parsed.annotations.is_empty());
 
-        let incomplete = parse_test_annotations(b"+10\x14\0", 0).expect("tolerated empty TAL");
-        assert_eq!(incomplete.record_onset_seconds, None);
+        assert!(matches!(
+            parse_test_annotations(b"+10\x14\0", 0)
+                .expect_err("TAL must end with separator then NUL")
+                .kind,
+            ParseErrorKind::MalformedAnnotation { .. }
+        ));
     }
 
     #[test]
@@ -1152,6 +1221,8 @@ mod tests {
             &b"+-1\x14event\x14\0"[..],
             &b"+1\x15-2\x14event\x14\0"[..],
             &b"+1\x15+2\x14event\x14\0"[..],
+            &b"+0.\x14event\x14\0"[..],
+            &b"+1\x151.\x14event\x14\0"[..],
         ] {
             assert!(
                 matches!(

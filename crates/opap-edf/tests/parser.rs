@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // Copyright (c) 2026 OPAP contributors
-// Synthetic conformance coverage for the OSCAR-informed EDF implementation.
+// Synthetic Rust regressions. Tests named `pinned_oscar_source_*` cover only
+// behavior inspected at OSCAR-code commit 64c5e90a26f91fb15868bcfcccde0c1e1522ac86;
+// they do not claim complete C++ parity. See ../README.md.
 
 use opap_edf::{Limits, ParseErrorKind, Parser, SignalData, parse, parse_header};
 
@@ -47,7 +49,7 @@ fn synthetic_edf(
     bytes.extend(field("ResMed SRN=123456", 80));
     bytes.extend_from_slice(b"29.02.2401.02.03");
     bytes.extend(field(&header_bytes.to_string(), 8));
-    bytes.extend(field("EDF+C", 44));
+    bytes.extend(field("", 44));
     bytes.extend(field(record_count, 8));
     bytes.extend(field("1", 8));
     bytes.extend(field(&signals.len().to_string(), 4));
@@ -128,6 +130,47 @@ fn parses_fixed_header_and_affine_scaling() {
 }
 
 #[test]
+fn pinned_oscar_source_reads_signal_descriptors_in_column_major_order() {
+    let specs = [
+        SignalSpec {
+            label: "Flow",
+            dimension: "L/s",
+            physical_min: "-2",
+            physical_max: "2",
+            digital_min: "-2048",
+            digital_max: "2047",
+            samples_per_record: "25",
+        },
+        SignalSpec {
+            label: "Pressure",
+            dimension: "cmH2O",
+            physical_min: "0",
+            physical_max: "30",
+            digital_min: "0",
+            digital_max: "3000",
+            samples_per_record: "2",
+        },
+    ];
+    let bytes = synthetic_edf(&specs, "0", &[]);
+    let header = parse_header(&bytes).expect("valid signal descriptors");
+
+    assert_eq!(header.signals[0].label, "Flow");
+    assert_eq!(header.signals[0].physical_dimension, "L/s");
+    assert!((header.signals[0].physical_minimum - (-2.0)).abs() < f64::EPSILON);
+    assert!((header.signals[0].physical_maximum - 2.0).abs() < f64::EPSILON);
+    assert_eq!(header.signals[0].digital_minimum, -2048);
+    assert_eq!(header.signals[0].digital_maximum, 2047);
+    assert_eq!(header.signals[0].samples_per_record, 25);
+    assert_eq!(header.signals[1].label, "Pressure");
+    assert_eq!(header.signals[1].physical_dimension, "cmH2O");
+    assert!(header.signals[1].physical_minimum.abs() < f64::EPSILON);
+    assert!((header.signals[1].physical_maximum - 30.0).abs() < f64::EPSILON);
+    assert_eq!(header.signals[1].digital_minimum, 0);
+    assert_eq!(header.signals[1].digital_maximum, 3000);
+    assert_eq!(header.signals[1].samples_per_record, 2);
+}
+
+#[test]
 fn applies_the_edf_year_pivot_and_preserves_the_wire_year() {
     let specs = [signal("Flow", "1")];
     let mut bytes = synthetic_edf(&specs, "0", &[]);
@@ -160,7 +203,7 @@ fn physical_iterator_rejects_calibrations_that_can_overflow() {
 }
 
 #[test]
-fn deinterleaves_multiple_signals_across_records_and_iterates_records() {
+fn pinned_oscar_source_decodes_signed_little_endian_samples() {
     let specs = [signal("Flow", "2"), signal("Pressure", "1")];
     let bytes = synthetic_edf(
         &specs,
@@ -193,7 +236,7 @@ fn exposes_annotations_per_signal_and_record() {
     annotation.resize(64, 0);
     let specs = [signal("EDF Annotations", "32"), signal("Flow", "1")];
     let bytes = synthetic_edf(&specs, "1", &[vec![annotation, samples(&[7])]]);
-    let file = parse(&bytes).expect("valid EDF+");
+    let file = parse(&bytes).expect("valid annotation-bearing EDF");
     let SignalData::Annotations(records) = &file.signals()[0].data else {
         panic!("expected annotation data");
     };
@@ -216,7 +259,7 @@ fn exposes_annotations_per_signal_and_record() {
 }
 
 #[test]
-fn infers_unknown_record_count_and_preserves_duplicate_labels() {
+fn infers_unknown_record_count_from_complete_payload() {
     let specs = [signal("Flow", "1"), signal("Flow", "1")];
     let bytes = synthetic_edf(
         &specs,
@@ -228,17 +271,59 @@ fn infers_unknown_record_count_and_preserves_duplicate_labels() {
     );
     let file = parse(&bytes).expect("valid unknown record count");
     assert_eq!(file.record_count(), 2);
-    assert_eq!(file.signals_named("Flow").count(), 2);
 }
 
 #[test]
-fn known_record_count_tolerates_and_reports_trailing_data_like_oscar() {
+fn pinned_oscar_source_preserves_duplicate_labels() {
+    let specs = [signal("Flow", "1"), signal("Flow", "1")];
+    let bytes = synthetic_edf(&specs, "1", &[vec![samples(&[1]), samples(&[2])]]);
+    let file = parse(&bytes).expect("valid duplicate labels");
+
+    assert_eq!(file.signals_named("Flow").count(), 2);
+    assert_eq!(file.signals()[0].digital_samples(), Some(&[1][..]));
+    assert_eq!(file.signals()[1].digital_samples(), Some(&[2][..]));
+}
+
+#[test]
+fn pinned_oscar_source_known_count_tolerates_trailing_data() {
     let specs = [signal("Flow", "1")];
     let mut bytes = synthetic_edf(&specs, "1", &[vec![samples(&[9])]]);
     bytes.extend_from_slice(&[0xaa, 0xbb, 0xcc]);
     let file = parse(&bytes).expect("trailing data is tolerated");
     assert_eq!(file.trailing_data_bytes(), 3);
     assert_eq!(file.signals()[0].digital_samples(), Some(&[9][..]));
+}
+
+#[test]
+fn pinned_oscar_source_annotation_label_matching_is_case_sensitive_substring() {
+    let mut compatible = b"+0\x14event\x14\0".to_vec();
+    compatible.resize(32, 0);
+    let specs = [
+        signal("X Annotations Y", "16"),
+        signal("X annotations Y", "1"),
+    ];
+    let bytes = synthetic_edf(&specs, "1", &[vec![compatible, samples(&[0x1234])]]);
+    let file = parse(&bytes).expect("valid compatibility labels");
+
+    assert!(matches!(file.signals()[0].data, SignalData::Annotations(_)));
+    assert_eq!(file.signals()[1].digital_samples(), Some(&[0x1234][..]));
+}
+
+#[test]
+fn pinned_oscar_source_decodes_invalid_annotation_utf8_lossily() {
+    let mut annotation = b"+0\x14invalid:\xff\x14\0".to_vec();
+    annotation.resize(32, 0);
+    let specs = [signal("EDF Annotations", "16")];
+    let bytes = synthetic_edf(&specs, "1", &[vec![annotation]]);
+    let file = parse(&bytes).expect("invalid UTF-8 is replaced");
+    let decoded = file.signals()[0]
+        .annotation_records()
+        .expect("annotation records")[0]
+        .annotations[0]
+        .text
+        .as_str();
+
+    assert_eq!(decoded, "invalid:\u{fffd}");
 }
 
 #[test]
@@ -272,7 +357,7 @@ fn every_truncated_prefix_is_rejected_without_panicking() {
 }
 
 #[test]
-fn enforces_the_oscar_signal_count_boundary() {
+fn pinned_oscar_source_enforces_signal_count_boundary() {
     let none = synthetic_edf(&[], "0", &[]);
     assert!(matches!(
         parse(&none).expect_err("zero signals").kind,
@@ -282,6 +367,26 @@ fn enforces_the_oscar_signal_count_boundary() {
             ..
         }
     ));
+
+    let minimum = [signal("Flow", "0")];
+    let bytes = synthetic_edf(&minimum, "0", &[]);
+    assert_eq!(
+        parse_header(&bytes)
+            .expect("one signal is the inclusive minimum")
+            .signals
+            .len(),
+        1
+    );
+
+    let maximum = vec![signal("Flow", "0"); 256];
+    let bytes = synthetic_edf(&maximum, "0", &[]);
+    assert_eq!(
+        parse_header(&bytes)
+            .expect("256 signals is the inclusive maximum")
+            .signals
+            .len(),
+        256
+    );
 
     let too_many = vec![signal("Flow", "0"); 257];
     let bytes = synthetic_edf(&too_many, "0", &[]);
@@ -575,6 +680,132 @@ fn preserves_discontinuous_record_timekeeping_onsets() {
 }
 
 #[test]
+fn well_formed_edf_c_timekeeping_tals_are_retained() {
+    let mut first = b"+0.25\x14\x14\0".to_vec();
+    first.resize(16, 0);
+    let mut second = b"+1.25\x14\x14\0".to_vec();
+    second.resize(16, 0);
+    let specs = [signal("EDF Annotations", "8")];
+    let mut bytes = synthetic_edf(&specs, "2", &[vec![first], vec![second]]);
+    bytes[192..236].copy_from_slice(&field("EDF+C", 44));
+
+    let file = parse(&bytes).expect("well-formed EDF+C clocks");
+    assert_eq!(
+        file.record(0).expect("record 0").onset_seconds(),
+        Some(0.25)
+    );
+    assert_eq!(
+        file.record(1).expect("record 1").onset_seconds(),
+        Some(1.25)
+    );
+}
+
+#[test]
+fn edf_c_requires_a_primary_clock_in_every_record() {
+    let mut clock = b"+0\x14\x14\0".to_vec();
+    clock.resize(16, 0);
+    let mut event_without_clock = b"+1\x14event\x14\0".to_vec();
+    event_without_clock.resize(16, 0);
+    let specs = [signal("EDF Annotations", "8")];
+    let mut bytes = synthetic_edf(&specs, "2", &[vec![clock], vec![event_without_clock]]);
+    bytes[192..236].copy_from_slice(&field("EDF+C", 44));
+
+    let error = parse(&bytes).expect_err("second EDF+C record has no timekeeping TAL");
+    assert!(matches!(
+        error.kind,
+        ParseErrorKind::MissingRecordTimekeepingOnset
+    ));
+    assert_eq!(error.signal_index, Some(0));
+    assert_eq!(error.record_index, Some(1));
+}
+
+#[test]
+fn edf_c_requires_contiguous_record_clocks() {
+    let mut first = b"+0.25\x14\x14\0".to_vec();
+    first.resize(16, 0);
+    let mut second = b"+2\x14\x14\0".to_vec();
+    second.resize(16, 0);
+    let specs = [signal("EDF Annotations", "8")];
+    let mut bytes = synthetic_edf(&specs, "2", &[vec![first], vec![second]]);
+    bytes[192..236].copy_from_slice(&field("EDF+C", 44));
+
+    let error = parse(&bytes).expect_err("second EDF+C record is not contiguous");
+    assert!(matches!(
+        error.kind,
+        ParseErrorKind::NonContiguousRecordTimekeepingOnset
+    ));
+    assert_eq!(error.signal_index, Some(0));
+    assert_eq!(error.record_index, Some(1));
+}
+
+#[test]
+fn edf_plus_first_clock_must_be_within_the_header_second() {
+    let mut clock = b"+1\x14\x14\0".to_vec();
+    clock.resize(16, 0);
+    let specs = [signal("EDF Annotations", "8")];
+
+    for reserved in ["EDF+C", "EDF+D"] {
+        let mut bytes = synthetic_edf(&specs, "1", &[vec![clock.clone()]]);
+        bytes[192..236].copy_from_slice(&field(reserved, 44));
+
+        assert!(matches!(
+            parse(&bytes)
+                .expect_err("first EDF+ onset must be +0.X")
+                .kind,
+            ParseErrorKind::InvalidFirstRecordTimekeepingOnset
+        ));
+    }
+}
+
+#[test]
+fn edf_plus_clock_must_use_plus_and_have_no_duration() {
+    let malformed_clocks = [&b"-0\x14\x14\0"[..], &b"+0\x151\x14\x14\0"[..]];
+    let specs = [signal("EDF Annotations", "8")];
+
+    for reserved in ["EDF+C", "EDF+D"] {
+        for malformed in malformed_clocks {
+            let mut record = malformed.to_vec();
+            record.resize(16, 0);
+            let mut bytes = synthetic_edf(&specs, "1", &[vec![record]]);
+            bytes[192..236].copy_from_slice(&field(reserved, 44));
+
+            assert!(
+                matches!(
+                    parse(&bytes).expect_err("invalid EDF+ record clock").kind,
+                    ParseErrorKind::MissingRecordTimekeepingOnset
+                ),
+                "accepted {reserved} clock bytes {malformed:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn public_parser_enforces_tal_numeric_separator_and_padding_grammar() {
+    let specs = [signal("EDF Annotations", "16")];
+    for malformed in [
+        &b"+1e3\x14event\x14\0"[..],
+        &b"+0.\x14event\x14\0"[..],
+        &b"+1\x151.\x14event\x14\0"[..],
+        &b"+1\x14event\0"[..],
+        &b"\0+0\x14\x14\0"[..],
+        &b"+0\x14\x14\0\0+1\x14event\x14\0"[..],
+    ] {
+        let mut annotation = malformed.to_vec();
+        annotation.resize(32, 0);
+        let bytes = synthetic_edf(&specs, "1", &[vec![annotation]]);
+
+        assert!(
+            matches!(
+                parse(&bytes).expect_err("malformed TAL").kind,
+                ParseErrorKind::MalformedAnnotation { .. }
+            ),
+            "accepted malformed TAL {malformed:?}"
+        );
+    }
+}
+
+#[test]
 fn primary_annotation_signal_is_the_only_canonical_record_clock() {
     let mut primary = b"+1\x14event\x14\0".to_vec();
     primary.resize(16, 0);
@@ -651,15 +882,18 @@ fn discontinuous_files_require_a_timekeeping_onset_in_every_record() {
 }
 
 #[test]
-fn discontinuous_files_require_the_exact_standard_annotation_label() {
+fn edf_plus_files_require_the_exact_standard_annotation_label() {
     let mut clock = b"+0\x14\x14\0".to_vec();
     clock.resize(8, 0);
     let specs = [signal("X Annotations", "4")];
-    let mut bytes = synthetic_edf(&specs, "1", &[vec![clock]]);
-    bytes[192..236].copy_from_slice(&field("EDF+D", 44));
 
-    assert!(matches!(
-        parse(&bytes).expect_err("nonstandard primary label").kind,
-        ParseErrorKind::MissingTimekeepingSignal
-    ));
+    for reserved in ["EDF+C", "EDF+D"] {
+        let mut bytes = synthetic_edf(&specs, "1", &[vec![clock.clone()]]);
+        bytes[192..236].copy_from_slice(&field(reserved, 44));
+
+        assert!(matches!(
+            parse(&bytes).expect_err("nonstandard primary label").kind,
+            ParseErrorKind::MissingTimekeepingSignal
+        ));
+    }
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // Copyright (c) 2026 OPAP contributors
-// OSCAR/SleepyHead attribution is documented in this crate's README.
+// Pinned OSCAR/SleepyHead provenance and differences are in README.md.
 
 use core::fmt;
 
@@ -88,6 +88,8 @@ pub enum ParseErrorKind {
     },
     MissingTimekeepingSignal,
     MissingRecordTimekeepingOnset,
+    InvalidFirstRecordTimekeepingOnset,
+    NonContiguousRecordTimekeepingOnset,
     MalformedAnnotation {
         reason: &'static str,
     },
@@ -163,9 +165,14 @@ impl fmt::Display for ParseError {
                 "could not reserve capacity for {requested} {resource}"
             ),
             ParseErrorKind::MissingTimekeepingSignal => formatter
-                .write_str("EDF+D requires a primary signal labeled exactly 'EDF Annotations'"),
+                .write_str("EDF+ requires a primary signal labeled exactly 'EDF Annotations'"),
             ParseErrorKind::MissingRecordTimekeepingOnset => formatter
-                .write_str("EDF+D record is missing its leading empty timekeeping annotation"),
+                .write_str("EDF+ record is missing its leading empty timekeeping annotation"),
+            ParseErrorKind::InvalidFirstRecordTimekeepingOnset => formatter.write_str(
+                "the first EDF+ record onset must be within the header start-time second",
+            ),
+            ParseErrorKind::NonContiguousRecordTimekeepingOnset => formatter
+                .write_str("EDF+C record onset is not contiguous with its declared duration"),
             ParseErrorKind::MalformedAnnotation { reason } => {
                 write!(formatter, "malformed EDF+ annotation: {reason}")
             }
