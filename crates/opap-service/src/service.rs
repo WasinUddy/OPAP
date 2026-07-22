@@ -9,7 +9,7 @@ use crate::{
     SessionImportCapability, SourceInspection, WarningSeverityDto,
 };
 use opap_core::{
-    DirectorySource, IMPORT_SCHEMA_VERSION, ImportSource, Importer, SourceEntryKind,
+    DirectorySource, IMPORT_SCHEMA_VERSION, ImportSource, Importer, MachineInfo, SourceEntryKind,
     WarningSeverity, resmed::ResmedImporter,
 };
 use opap_storage::{
@@ -25,7 +25,12 @@ use std::{
 use uuid::Uuid;
 
 const PROFILE_NAME_MAX_CHARS: usize = 100;
-const REQUEST_KEY_MAX_CHARS: usize = 200;
+const REQUEST_KEY_PREFIX: &str = "opap-request:";
+const DEVICE_DISPLAY_MAX_CHARS: usize = 80;
+const DEVICE_DISPLAY_MAX_BYTES: usize = 256;
+const UNKNOWN_DEVICE_MODEL: &str = "Unknown ResMed device";
+const UNKNOWN_IMPORTER_ID: &str = "unknown";
+const REQUEST_KEY_GENERATION_ATTEMPTS: usize = 8;
 
 /// Injectable time source; hosts use [`SystemClock`] and tests can be exact.
 pub trait Clock {
@@ -133,6 +138,7 @@ impl<C: Clock> AppService<C> {
                 RegisteredSource {
                     _source: source,
                     importer_id,
+                    request_keys: BTreeMap::new(),
                 },
             );
         Ok(inspection)
@@ -148,74 +154,80 @@ impl<C: Clock> AppService<C> {
         request: PrepareImportJobRequest,
     ) -> ApiResult<PrepareImportJobResponse> {
         self.require_profile(request.profile_id)?;
-        let request_key = validate_request_key(&request.request_key)?;
         validate_source_id(&request.source_id)?;
-        if let Some(existing) = self
-            .database
-            .imports()
-            .find_by_key(request.profile_id, request_key)
-            .map_err(ApiError::storage)?
-        {
-            if existing.source_uri != request.source_id {
-                return Err(request_key_conflict());
+
+        let mut sources = self.sources.lock().map_err(|_| source_registry_error())?;
+        let registered = sources
+            .get_mut(&request.source_id)
+            .ok_or_else(source_handle_unavailable)?;
+        let importer_id = registered.importer_id.clone().ok_or_else(|| {
+            ApiError::for_field(
+                ApiErrorCode::SourceNotSupported,
+                "the selected source is not a supported CPAP source",
+                "source_id",
+            )
+        })?;
+
+        if let Some(request_key) = registered.request_keys.get(&request.profile_id) {
+            if let Some(existing) = self
+                .database
+                .imports()
+                .find_by_key(request.profile_id, request_key)
+                .map_err(ApiError::storage)?
+            {
+                if existing.source_uri != request.source_id || existing.loader_name != importer_id {
+                    return Err(source_registry_error());
+                }
+                return Ok(PrepareImportJobResponse {
+                    job: job_dto(existing),
+                    created: false,
+                });
             }
-            return Ok(PrepareImportJobResponse {
-                job: job_dto(existing),
-                created: false,
-            });
+            registered.request_keys.remove(&request.profile_id);
         }
 
-        let importer_id = self
-            .sources
-            .lock()
-            .map_err(|_| source_registry_error())?
-            .get(&request.source_id)
-            .ok_or_else(source_handle_unavailable)?
-            .importer_id
-            .clone()
-            .ok_or_else(|| {
-                ApiError::for_field(
-                    ApiErrorCode::SourceNotSupported,
-                    "the selected source is not a supported CPAP source",
-                    "source_id",
-                )
-            })?;
+        for _ in 0..REQUEST_KEY_GENERATION_ATTEMPTS {
+            let request_key = new_request_key();
+            let begun = self
+                .database
+                .imports()
+                .begin_or_get(&NewImport {
+                    profile_id: request.profile_id,
+                    machine_id: None,
+                    import_key: &request_key,
+                    source_uri: &request.source_id,
+                    loader_name: &importer_id,
+                    initial_status: InitialImportStatus::Blocked,
+                    state_message: Some(SESSION_IMPORT_UNAVAILABLE_REASON),
+                    created_at_ms: self.clock.now_ms(),
+                })
+                .map_err(ApiError::storage)?;
 
-        let begun = self
-            .database
-            .imports()
-            .begin_or_get(&NewImport {
-                profile_id: request.profile_id,
-                machine_id: None,
-                import_key: request_key,
-                source_uri: &request.source_id,
-                loader_name: &importer_id,
-                initial_status: InitialImportStatus::Blocked,
-                state_message: Some(SESSION_IMPORT_UNAVAILABLE_REASON),
-                created_at_ms: self.clock.now_ms(),
-            })
-            .map_err(ApiError::storage)?;
-
-        if !begun.inserted
-            && (begun.history.source_uri != request.source_id
-                || begun.history.loader_name != importer_id)
-        {
-            return Err(request_key_conflict());
+            if begun.inserted {
+                registered
+                    .request_keys
+                    .insert(request.profile_id, request_key);
+                return Ok(PrepareImportJobResponse {
+                    job: job_dto(begun.history),
+                    created: true,
+                });
+            }
         }
 
-        Ok(PrepareImportJobResponse {
-            job: job_dto(begun.history),
-            created: begun.inserted,
-        })
+        Err(ApiError::new(
+            ApiErrorCode::Internal,
+            "could not allocate an opaque import request identifier",
+        ))
     }
 
     pub fn list_import_jobs(&self, profile_id: i64) -> ApiResult<Vec<ImportJobDto>> {
         self.require_profile(profile_id)?;
-        self.database
+        let jobs = self
+            .database
             .imports()
             .list_by_profile(profile_id)
-            .map(|jobs| jobs.into_iter().map(job_dto).collect())
-            .map_err(ApiError::storage)
+            .map_err(ApiError::storage)?;
+        Ok(jobs.into_iter().map(job_dto).collect())
     }
 
     pub fn get_import_job(&self, profile_id: i64, job_id: i64) -> ApiResult<ImportJobDto> {
@@ -300,13 +312,7 @@ fn inspect_directory(
             (
                 discovery.inventory,
                 Some(importer.id().to_owned()),
-                Some(DeviceDto {
-                    brand: device.brand,
-                    model: device.model,
-                    model_number: device.model_number,
-                    serial_suffix: serial_suffix(&device.serial),
-                    series: device.series,
-                }),
+                Some(device_dto(device)),
                 discovery
                     .warnings
                     .into_iter()
@@ -390,35 +396,6 @@ fn validate_profile_name(display_name: &str) -> ApiResult<&str> {
     Ok(display_name)
 }
 
-fn validate_request_key(request_key: &str) -> ApiResult<&str> {
-    let request_key = request_key.trim();
-    if request_key.is_empty() || request_key.chars().count() > REQUEST_KEY_MAX_CHARS {
-        return Err(ApiError::for_field(
-            ApiErrorCode::InvalidRequest,
-            format!("request key must contain 1 to {REQUEST_KEY_MAX_CHARS} characters"),
-            "request_key",
-        ));
-    }
-    if request_key.chars().any(char::is_control) {
-        return Err(ApiError::for_field(
-            ApiErrorCode::InvalidRequest,
-            "request key cannot contain control characters",
-            "request_key",
-        ));
-    }
-    if !request_key
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
-    {
-        return Err(ApiError::for_field(
-            ApiErrorCode::InvalidRequest,
-            "request key may contain only letters, digits, dash, underscore, dot, or colon",
-            "request_key",
-        ));
-    }
-    Ok(request_key)
-}
-
 fn validate_source_id(source_id: &str) -> ApiResult<()> {
     if !is_valid_source_id(source_id) {
         return Err(ApiError::for_field(
@@ -499,12 +476,11 @@ fn job_dto(history: ImportHistory) -> ImportJobDto {
     ImportJobDto {
         id: history.id,
         profile_id: history.profile_id,
-        request_key: history.import_key,
         attempt: history.attempt,
         retry_of_id: history.retry_of_id,
         source_id: safe_persisted_source_id(&history.source_uri, history.id),
         source_label: source_label(Some(&history.loader_name)),
-        importer_id: history.loader_name,
+        importer_id: safe_importer_id(&history.loader_name).to_owned(),
         status,
         phase,
         created_at_ms: history.created_at_ms,
@@ -537,14 +513,6 @@ fn job_not_found() -> ApiError {
     )
 }
 
-fn request_key_conflict() -> ApiError {
-    ApiError::for_field(
-        ApiErrorCode::Conflict,
-        "request key is already associated with another source ID",
-        "request_key",
-    )
-}
-
 fn source_handle_unavailable() -> ApiError {
     ApiError::for_field(
         ApiErrorCode::SourceUnavailable,
@@ -565,6 +533,7 @@ struct RegisteredSource {
     // for a future executor without retaining an absolute path in any DTO.
     _source: DirectorySource,
     importer_id: Option<String>,
+    request_keys: BTreeMap<i64, String>,
 }
 
 struct InventoriedSource<'source> {
@@ -601,12 +570,23 @@ fn new_source_id() -> String {
     format!("opap-source:{}", Uuid::new_v4().simple())
 }
 
+fn new_request_key() -> String {
+    format!("{REQUEST_KEY_PREFIX}{}", Uuid::new_v4().simple())
+}
+
 fn source_label(importer_id: Option<&str>) -> String {
     match importer_id {
         Some(opap_core::resmed::IMPORTER_ID) => "ResMed SD card",
         _ => "Selected folder",
     }
     .to_owned()
+}
+
+fn safe_importer_id(importer_id: &str) -> &'static str {
+    match importer_id {
+        opap_core::resmed::IMPORTER_ID => opap_core::resmed::IMPORTER_ID,
+        _ => UNKNOWN_IMPORTER_ID,
+    }
 }
 
 fn safe_persisted_source_id(value: &str, job_id: i64) -> String {
@@ -617,10 +597,84 @@ fn safe_persisted_source_id(value: &str, job_id: i64) -> String {
     }
 }
 
-fn serial_suffix(serial: &str) -> String {
-    let mut characters: Vec<_> = serial.chars().rev().take(4).collect();
-    characters.reverse();
-    characters.into_iter().collect()
+fn device_dto(device: MachineInfo) -> DeviceDto {
+    let series = sanitize_device_display_field(&device.model, &device.serial)
+        .and_then(|_| canonical_device_series(&device.series, &device.serial));
+    DeviceDto {
+        brand: "ResMed".to_owned(),
+        model: series
+            .map(str::to_owned)
+            .unwrap_or_else(|| UNKNOWN_DEVICE_MODEL.to_owned()),
+        // Product codes are untrusted free text and OPAP does not yet carry a
+        // service-owned catalog capable of mapping them without leaking data.
+        model_number: String::new(),
+        serial_suffix: safe_serial_suffix(&device.serial),
+        series: series.unwrap_or_default().to_owned(),
+    }
+}
+
+fn canonical_device_series(value: &str, full_serial: &str) -> Option<&'static str> {
+    let value = sanitize_device_display_field(value, full_serial)?;
+    match value.as_str() {
+        "AirSense 11" => Some("AirSense 11"),
+        "AirCurve 11" => Some("AirCurve 11"),
+        "AirSense 10" => Some("AirSense 10"),
+        "Sleepmate 10" => Some("SleepMate 10"),
+        "AirCurve 10" => Some("AirCurve 10"),
+        "Lumis" => Some("Lumis"),
+        "S9" => Some("S9"),
+        _ => None,
+    }
+}
+
+fn sanitize_device_display_field(value: &str, full_serial: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || !value.is_ascii()
+        || value.len() > DEVICE_DISPLAY_MAX_BYTES
+        || value.chars().count() > DEVICE_DISPLAY_MAX_CHARS
+        || value.chars().any(is_unsafe_display_character)
+        || looks_like_path_or_url(value)
+        || contains_case_insensitive(value, full_serial.trim())
+    {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+fn is_unsafe_display_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}'
+        )
+}
+
+fn looks_like_path_or_url(value: &str) -> bool {
+    let lowercase = value.to_ascii_lowercase();
+    value.contains(['/', '\\', ':'])
+        || value.starts_with(['.', '~'])
+        || value.contains("..")
+        || lowercase.starts_with("www.")
+        || lowercase.contains("%2f")
+        || lowercase.contains("%5c")
+}
+
+fn contains_case_insensitive(value: &str, needle: &str) -> bool {
+    !needle.is_empty()
+        && needle.len() <= value.len()
+        && value.to_lowercase().contains(&needle.to_lowercase())
+}
+
+fn safe_serial_suffix(serial: &str) -> String {
+    let serial = serial.trim();
+    if serial.len() <= 4
+        || serial.len() > DEVICE_DISPLAY_MAX_BYTES
+        || !serial.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return String::new();
+    }
+    serial[serial.len() - 4..].to_owned()
 }
 
 fn safe_warning_message(code: &str) -> String {
@@ -654,6 +708,57 @@ mod tests {
             ApiErrorCode::InvalidRequest
         );
         assert!(validate_profile_name(&"x".repeat(101)).is_err());
+    }
+
+    #[test]
+    fn service_generated_request_keys_use_the_internal_opaque_format() {
+        let request_key = new_request_key();
+        let suffix = request_key
+            .strip_prefix(REQUEST_KEY_PREFIX)
+            .expect("request key prefix");
+        assert_eq!(suffix.len(), 32);
+        assert!(
+            suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+    }
+
+    #[test]
+    fn device_display_fields_are_bounded_and_privacy_sanitized() {
+        let serial = "PrivateSerialABC123456789";
+        assert_eq!(
+            sanitize_device_display_field("  AirSense 10 AutoSet  ", serial).as_deref(),
+            Some("AirSense 10 AutoSet")
+        );
+
+        for unsafe_value in [
+            "/Users/private/model",
+            r"C:\Users\private\model",
+            "https://example.test/model",
+            "www.example.test",
+            "../private/model",
+            "∕Users∕private∕model",
+            "%2fUsers%2fprivate%2fmodel",
+            "model\nname",
+            "model\u{202e}name",
+            "AirSense privateserialabc123456789",
+        ] {
+            assert_eq!(
+                sanitize_device_display_field(unsafe_value, serial),
+                None,
+                "unsafe value was accepted"
+            );
+        }
+        assert_eq!(
+            sanitize_device_display_field(&"x".repeat(DEVICE_DISPLAY_MAX_CHARS + 1), serial),
+            None
+        );
+        assert_eq!(safe_serial_suffix("23123456789"), "6789");
+        assert!(safe_serial_suffix("1234").is_empty());
+        assert!(safe_serial_suffix("serial/PHI").is_empty());
+        assert!(safe_serial_suffix("serial-1234").is_empty());
+        assert!(safe_serial_suffix("serial\u{202e}1234").is_empty());
     }
 
     #[test]

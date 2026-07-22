@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Current version of the service DTO contract.
-pub const API_SCHEMA_VERSION: u16 = 1;
+pub const API_SCHEMA_VERSION: u16 = 2;
 
 /// Stable reason session import cannot currently run.
 pub const SESSION_IMPORT_UNAVAILABLE_REASON: &str = "session_parser_not_implemented";
@@ -72,11 +72,19 @@ pub struct SourceInspection {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceDto {
+    /// Service-owned manufacturer label; never copied from removable media.
     pub brand: String,
+    /// Service-owned canonical family label or `Unknown ResMed device` when
+    /// card metadata cannot be mapped safely.
     pub model: String,
+    /// Reserved for a future service-owned product-code catalog. Raw card text
+    /// is never forwarded and this is currently empty.
     pub model_number: String,
-    /// At most the final four device serial characters.
+    /// Final four ASCII serial characters, or empty when a safe partial serial
+    /// cannot be produced without revealing the full value.
     pub serial_suffix: String,
+    /// Service-owned canonical family label; empty when metadata is unsafe or
+    /// not recognized.
     pub series: String,
 }
 
@@ -102,13 +110,12 @@ pub struct SessionImportCapability {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PrepareImportJobRequest {
     pub profile_id: i64,
     /// Opaque handle returned by native source inspection. No filesystem path
     /// crosses the serialized application boundary.
     pub source_id: String,
-    /// Caller-generated idempotency key, scoped to the profile.
-    pub request_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,7 +156,6 @@ pub struct ImportJobCounts {
 pub struct ImportJobDto {
     pub id: i64,
     pub profile_id: i64,
-    pub request_key: String,
     pub attempt: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_of_id: Option<i64>,

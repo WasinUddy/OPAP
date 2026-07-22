@@ -31,13 +31,49 @@ fn test_service(
 }
 
 fn resmed_card(root: &Path) -> Result<(), Box<dyn Error>> {
+    resmed_card_with_identification(
+        root,
+        "#SRN 23123456789\n#PNA AirSense_10_AutoSet\n#PCD 37028\n",
+    )
+}
+
+fn resmed_card_with_identification(
+    root: &Path,
+    identification: &str,
+) -> Result<(), Box<dyn Error>> {
     fs::create_dir(root.join("DATALOG"))?;
     fs::write(root.join("STR.edf"), [])?;
-    fs::write(
-        root.join("Identification.tgt"),
-        "#SRN 23123456789\n#PNA AirSense_10_AutoSet\n#PCD 37028\n",
-    )?;
+    fs::write(root.join("Identification.tgt"), identification)?;
     Ok(())
+}
+
+fn request_key(discriminator: u128) -> String {
+    format!("opap-request:{discriminator:032x}")
+}
+
+fn assert_json_excludes(value: &serde_json::Value, canaries: &[&str]) {
+    match value {
+        serde_json::Value::String(text) => {
+            let text = text.to_lowercase();
+            for canary in canaries {
+                assert!(
+                    !text.contains(&canary.to_lowercase()),
+                    "serialized string leaked canary"
+                );
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                assert_json_excludes(value, canaries);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                assert_json_excludes(value, canaries);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[test]
@@ -46,6 +82,7 @@ fn bootstrap_and_profile_lifecycle_are_deterministic() -> TestResult {
     let service = test_service(&directory, 1_700_000_000_000)?;
 
     let empty = service.bootstrap()?;
+    assert_eq!(API_SCHEMA_VERSION, 2);
     assert_eq!(empty.api_schema_version, API_SCHEMA_VERSION);
     assert!(!empty.capabilities.session_import);
     assert_eq!(empty.profiles, []);
@@ -81,13 +118,76 @@ fn source_inspection_recognizes_resmed_without_claiming_session_support() -> Tes
     assert_eq!(inspection.importer_id.as_deref(), Some("resmed"));
     assert_eq!(inspection.source_label, "ResMed SD card");
     assert!(inspection.source_id.starts_with("opap-source:"));
-    assert_eq!(inspection.device.expect("device").serial_suffix, "6789");
+    let device = inspection.device.expect("device");
+    assert_eq!(device.model, "AirSense 10");
+    assert!(device.model_number.is_empty());
+    assert_eq!(device.series, "AirSense 10");
+    assert_eq!(device.serial_suffix, "6789");
     assert_eq!(inspection.files, 2);
     assert_eq!(inspection.directories, 1);
     assert!(!inspection.session_import.available);
     assert_eq!(
         inspection.session_import.unavailable_reason.as_deref(),
         Some(SESSION_IMPORT_UNAVAILABLE_REASON)
+    );
+    Ok(())
+}
+
+#[test]
+fn source_inspection_redacts_untrusted_device_display_fields() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let card = directory.path().join("RESMED");
+    fs::create_dir(&card)?;
+    let full_serial = "PrivateSerialABC123456789";
+    let unix_path = "/Users/alice/private-card";
+    let windows_path = r"C:\Users\Alice\private-card";
+    let identification = format!(
+        "#SRN {full_serial}\n#PNA AirSense_10_{}\n#PCD {unix_path} {windows_path}\n",
+        full_serial.to_lowercase()
+    );
+    resmed_card_with_identification(&card, &identification)?;
+    let service = test_service(&directory, 1_700_000_000_000)?;
+
+    let inspection = service.inspect_source(&card)?;
+    let device = inspection.device.as_ref().expect("device");
+    assert_eq!(device.brand, "ResMed");
+    assert_eq!(device.model, "Unknown ResMed device");
+    assert!(device.model_number.is_empty());
+    assert!(device.series.is_empty());
+    assert_eq!(device.serial_suffix, "6789");
+
+    let serialized = serde_json::to_value(&inspection)?;
+    assert_json_excludes(&serialized, &[full_serial, unix_path, windows_path]);
+    Ok(())
+}
+
+#[test]
+fn source_inspection_blocks_split_serial_and_encoded_path_reconstruction() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let card = directory.path().join("RESMED");
+    fs::create_dir(&card)?;
+    let full_serial = "23123456789";
+    let serial_prefix = "2312345";
+    let unicode_path = "∕Users∕alice∕private-card";
+    let encoded_path = "%2fVolumes%2fprivate-card";
+    let identification = format!(
+        "#SRN {full_serial}\n#PNA AirSense_10_{serial_prefix}_{unicode_path}_{encoded_path}\n#PCD 6789\n"
+    );
+    resmed_card_with_identification(&card, &identification)?;
+    let service = test_service(&directory, 1_700_000_000_000)?;
+
+    let inspection = service.inspect_source(&card)?;
+    let device = inspection.device.as_ref().expect("device");
+    assert_eq!(device.brand, "ResMed");
+    assert_eq!(device.model, "Unknown ResMed device");
+    assert!(device.model_number.is_empty());
+    assert!(device.series.is_empty());
+    assert_eq!(device.serial_suffix, "6789");
+
+    let serialized = serde_json::to_value(&inspection)?;
+    assert_json_excludes(
+        &serialized,
+        &[full_serial, serial_prefix, unicode_path, encoded_path],
     );
     Ok(())
 }
@@ -111,7 +211,6 @@ fn unknown_source_is_inspectable_but_cannot_be_prepared() -> TestResult {
         .prepare_import_job(PrepareImportJobRequest {
             profile_id: profile.id,
             source_id: inspection.source_id,
-            request_key: "request-1".to_owned(),
         })
         .expect_err("unsupported source");
     assert_eq!(error.code, ApiErrorCode::SourceNotSupported);
@@ -133,7 +232,6 @@ fn prepared_job_is_persisted_idempotent_honest_and_cancellable() -> TestResult {
     let request = PrepareImportJobRequest {
         profile_id: profile.id,
         source_id: source.source_id,
-        request_key: "card-snapshot-1".to_owned(),
     };
 
     let first = service.prepare_import_job(request.clone())?;
@@ -197,7 +295,6 @@ fn idempotent_job_replay_works_after_the_source_is_unplugged() -> TestResult {
     let request = PrepareImportJobRequest {
         profile_id: profile.id,
         source_id: source.source_id,
-        request_key: "survives-eject".to_owned(),
     };
     let created = service.prepare_import_job(request.clone())?;
 
@@ -211,7 +308,7 @@ fn idempotent_job_replay_works_after_the_source_is_unplugged() -> TestResult {
 }
 
 #[test]
-fn jobs_survive_database_reopen_and_request_keys_cannot_be_reused() -> TestResult {
+fn jobs_survive_database_reopen_and_source_handles_expire() -> TestResult {
     let directory = tempfile::tempdir()?;
     let card = directory.path().join("RESMED");
     let second_card = directory.path().join("RESMED-BACKUP");
@@ -228,7 +325,6 @@ fn jobs_survive_database_reopen_and_request_keys_cannot_be_reused() -> TestResul
     let prepared = service.prepare_import_job(PrepareImportJobRequest {
         profile_id: profile.id,
         source_id: source.source_id,
-        request_key: "same-key".to_owned(),
     })?;
     let expired_source_id = prepared.job.source_id.clone();
     drop(service);
@@ -239,19 +335,16 @@ fn jobs_survive_database_reopen_and_request_keys_cannot_be_reused() -> TestResul
         ImportJobStatus::Blocked
     );
     let second_source = reopened.inspect_source(&second_card)?;
-    let conflict = reopened
-        .prepare_import_job(PrepareImportJobRequest {
-            profile_id: profile.id,
-            source_id: second_source.source_id,
-            request_key: "same-key".to_owned(),
-        })
-        .expect_err("key belongs to original source");
-    assert_eq!(conflict.code, ApiErrorCode::Conflict);
+    let second = reopened.prepare_import_job(PrepareImportJobRequest {
+        profile_id: profile.id,
+        source_id: second_source.source_id,
+    })?;
+    assert!(second.created);
+    assert_ne!(second.job.id, prepared.job.id);
     let expired = reopened
         .prepare_import_job(PrepareImportJobRequest {
             profile_id: profile.id,
             source_id: expired_source_id,
-            request_key: "new-key-after-restart".to_owned(),
         })
         .expect_err("native capability expires at restart");
     assert_eq!(expired.code, ApiErrorCode::SourceUnavailable);
@@ -289,12 +382,20 @@ fn validation_and_profile_ownership_have_stable_codes() -> TestResult {
     let profile = service.create_profile(CreateProfileRequest {
         display_name: "Alex".to_owned(),
     })?;
+    let injected_request = serde_json::json!({
+        "profile_id": profile.id,
+        "source_id": "opap-source:0123456789abcdef0123456789abcdef",
+        "request_key": "0123456789abcdef0123456789abcdef"
+    });
+    assert!(
+        serde_json::from_value::<PrepareImportJobRequest>(injected_request).is_err(),
+        "renderers cannot supply request identifiers"
+    );
     assert_eq!(
         service
             .prepare_import_job(PrepareImportJobRequest {
                 profile_id: profile.id,
                 source_id: "opap-source:/Volumes/private-card".to_owned(),
-                request_key: "invalid-source-handle".to_owned(),
             })
             .expect_err("path-like source ID")
             .code,
@@ -343,10 +444,10 @@ fn web_dtos_and_persisted_jobs_contain_only_opaque_source_ids() -> TestResult {
     let request = PrepareImportJobRequest {
         profile_id: profile.id,
         source_id: source_id.clone(),
-        request_key: "privacy-contract".to_owned(),
     };
     let request_json = serde_json::to_string(&request)?;
     assert!(!request_json.contains("directory"));
+    assert!(!request_json.contains("request_key"));
     assert!(!request_json.contains(&card.to_string_lossy()[..]));
 
     let prepared = service.prepare_import_job(request)?;
@@ -361,6 +462,17 @@ fn web_dtos_and_persisted_jobs_contain_only_opaque_source_ids() -> TestResult {
         .get(prepared.job.id)?
         .expect("persisted import job");
     assert_eq!(persisted.source_uri, source_id);
+    let request_suffix = persisted
+        .import_key
+        .strip_prefix("opap-request:")
+        .expect("service-generated request key");
+    assert_eq!(request_suffix.len(), 32);
+    assert!(
+        request_suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
+    assert!(!job_json.contains(&persisted.import_key));
     assert_eq!(persisted.status, StorageImportStatus::Blocked);
     assert!(persisted.started_at_ms.is_none());
     assert!(!persisted.source_uri.contains(&card.to_string_lossy()[..]));
@@ -396,6 +508,62 @@ fn storage_boundary_rejects_raw_source_paths() -> TestResult {
 }
 
 #[test]
+fn historical_request_keys_are_never_echoed() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let database = Database::open(directory.path().join("opap.sqlite3"))?;
+    let profile = database.profiles().insert(&NewProfile {
+        display_name: "Alex",
+        now_ms: 1,
+    })?;
+    let private_key = "opap-request:0123456789abcdef0123456789abcdef";
+    database.imports().begin_or_get(&NewImport {
+        profile_id: profile.id,
+        machine_id: None,
+        import_key: private_key,
+        source_uri: "opap-source:0123456789abcdef0123456789abcdef",
+        loader_name: "resmed",
+        initial_status: InitialImportStatus::Blocked,
+        state_message: Some(SESSION_IMPORT_UNAVAILABLE_REASON),
+        created_at_ms: 1,
+    })?;
+
+    let service = AppService::from_database(database, FixedClock(2))?;
+    let jobs = service.list_import_jobs(profile.id)?;
+    assert_eq!(jobs.len(), 1);
+    assert!(!serde_json::to_string(&jobs)?.contains(private_key));
+    Ok(())
+}
+
+#[test]
+fn untrusted_stored_importer_names_are_allowlisted_before_serialization() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let database = Database::open(directory.path().join("opap.sqlite3"))?;
+    let profile = database.profiles().insert(&NewProfile {
+        display_name: "Alex",
+        now_ms: 1,
+    })?;
+    let private_loader = "/Users/private/custom-loader";
+    database.imports().begin_or_get(&NewImport {
+        profile_id: profile.id,
+        machine_id: None,
+        import_key: &request_key(9),
+        source_uri: "opap-source:0123456789abcdef0123456789abcdef",
+        loader_name: private_loader,
+        initial_status: InitialImportStatus::Blocked,
+        state_message: Some(SESSION_IMPORT_UNAVAILABLE_REASON),
+        created_at_ms: 1,
+    })?;
+
+    let service = AppService::from_database(database, FixedClock(2))?;
+    let jobs = service.list_import_jobs(profile.id)?;
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].importer_id, "unknown");
+    assert_eq!(jobs[0].source_label, "Selected folder");
+    assert!(!serde_json::to_string(&jobs)?.contains(private_loader));
+    Ok(())
+}
+
+#[test]
 fn running_jobs_are_recovered_to_blocked_when_service_opens() -> TestResult {
     let directory = tempfile::tempdir()?;
     let database_path = directory.path().join("opap.sqlite3");
@@ -407,7 +575,7 @@ fn running_jobs_are_recovered_to_blocked_when_service_opens() -> TestResult {
     let running = database.imports().begin_or_get(&NewImport {
         profile_id: profile.id,
         machine_id: None,
-        import_key: "interrupted-job",
+        import_key: &request_key(8),
         source_uri: "opap-source:0123456789abcdef0123456789abcdef",
         loader_name: "resmed",
         initial_status: InitialImportStatus::Running,
