@@ -237,6 +237,63 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  desktop-native:
+    name: Native desktop host (macOS)
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Restore native host Rust cache
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          shared-key: desktop-native-macos
+          workspaces: apps/desktop/src-tauri -> target
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        with:
+          package_json_file: apps/desktop/package.json
+          run_install: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.17.1
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+
+      - name: Install desktop dependencies
+        run: pnpm --dir apps/desktop install --frozen-lockfile
+
+      - name: Check native host formatting
+        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+
+      - name: Test native host
+        run: >-
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+          --locked --all-targets --all-features
+
+      - name: Lint native host
+        run: >-
+          cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml
+          --locked --all-targets --all-features -- -D warnings
+
+      - name: Compile native developer binary (no bundle)
+        working-directory: apps/desktop
+        env:
+          OPAP_BUILD_REVISION: ${{ github.sha }}
+          VITE_OPAP_SOURCE_REVISION: ${{ github.sha }}
+        run: pnpm run tauri:build:debug
+
   rust-build:
     name: Build Rust release artifact
     needs: [rust-format, rust-clippy, rust-test, rust-wasm, cucumber]

@@ -46,6 +46,21 @@ updates:
       acceptance-minor-and-patch:
         update-types: [minor, patch]
 
+  - package-ecosystem: cargo
+    directory: /apps/desktop/src-tauri
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:08"
+      timezone: Asia/Bangkok
+    open-pull-requests-limit: 3
+    rebase-strategy: auto
+    commit-message:
+      prefix: deps(desktop-native)
+    groups:
+      desktop-native-minor-and-patch:
+        update-types: [minor, patch]
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
