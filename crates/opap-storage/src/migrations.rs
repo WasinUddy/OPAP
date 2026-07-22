@@ -2,7 +2,7 @@ use crate::{Error, Result};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 pub const APPLICATION_ID: i32 = i32::from_be_bytes(*b"OPAP");
-pub const LATEST_SCHEMA_VERSION: i64 = 3;
+pub const LATEST_SCHEMA_VERSION: i64 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationRecord {
@@ -33,19 +33,27 @@ const MIGRATIONS: &[Migration] = &[
         name: "storage_integrity",
         sql: include_str!("../migrations/0003_storage_integrity.sql"),
     },
+    Migration {
+        version: 4,
+        name: "import_job_states",
+        sql: include_str!("../migrations/0004_import_job_states.sql"),
+    },
+    Migration {
+        version: 5,
+        name: "opaque_import_sources",
+        sql: include_str!("../migrations/0005_opaque_import_sources.sql"),
+    },
+    Migration {
+        version: 6,
+        name: "import_history_link_integrity",
+        sql: include_str!("../migrations/0006_import_history_link_integrity.sql"),
+    },
 ];
 
 pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     validate_application_id(connection)?;
-    connection.execute_batch(
-        "CREATE TABLE IF NOT EXISTS schema_migrations (
-             version       INTEGER PRIMARY KEY,
-             name          TEXT NOT NULL,
-             applied_at_ms INTEGER NOT NULL
-         ) STRICT;",
-    )?;
-
     let applied = applied_migrations(connection)?;
+    let current = applied.last().map_or(0, |record| record.version);
     for (index, record) in applied.iter().enumerate() {
         let expected = index as i64 + 1;
         if record.version != expected {
@@ -69,13 +77,29 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
         }
     }
 
-    let current = applied.last().map_or(0, |record| record.version);
     if current > LATEST_SCHEMA_VERSION {
         return Err(Error::SchemaTooNew {
             found: current,
             supported: LATEST_SCHEMA_VERSION,
         });
     }
+
+    let user_version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if user_version != current {
+        return Err(Error::MigrationVersionMismatch {
+            user_version,
+            history_version: current,
+        });
+    }
+
+    validate_foreign_keys(connection)?;
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+             version       INTEGER PRIMARY KEY,
+             name          TEXT NOT NULL,
+             applied_at_ms INTEGER NOT NULL
+         ) STRICT;",
+    )?;
 
     for migration in MIGRATIONS.iter().filter(|item| item.version > current) {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -86,11 +110,42 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
             params![migration.version, migration.name],
         )?;
         transaction.pragma_update(None, "user_version", migration.version)?;
+        validate_foreign_keys(&transaction)?;
         transaction.commit()?;
     }
 
     connection.pragma_update(None, "application_id", APPLICATION_ID)?;
+    validate_foreign_keys(connection)?;
 
+    Ok(())
+}
+
+fn validate_foreign_keys(connection: &Connection) -> Result<()> {
+    let violation = connection
+        .query_row(
+            "SELECT \"table\", rowid, parent, fkid
+             FROM pragma_foreign_key_check
+             ORDER BY \"table\", rowid, parent, fkid
+             LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((table, row_id, parent, foreign_key_index)) = violation {
+        return Err(Error::ForeignKeyViolation {
+            table,
+            row_id,
+            parent,
+            foreign_key_index,
+        });
+    }
     Ok(())
 }
 
@@ -135,4 +190,46 @@ pub(crate) fn applied_migrations(connection: &Connection) -> Result<Vec<Migratio
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn foreign_key_validation_sees_uncommitted_deferred_violations() -> Result<()> {
+        let mut connection = Connection::open_in_memory()?;
+        connection.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE parents (id INTEGER PRIMARY KEY);
+             CREATE TABLE children (
+                 id INTEGER PRIMARY KEY,
+                 parent_id INTEGER NOT NULL,
+                 FOREIGN KEY (parent_id) REFERENCES parents(id)
+                     DEFERRABLE INITIALLY DEFERRED
+             );",
+        )?;
+
+        {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute("INSERT INTO children VALUES (1, 999)", [])?;
+            let error = validate_foreign_keys(&transaction)
+                .expect_err("uncommitted foreign-key violation must be visible");
+            assert!(matches!(
+                error,
+                Error::ForeignKeyViolation {
+                    table,
+                    row_id: Some(1),
+                    parent,
+                    foreign_key_index: 0,
+                } if table == "children" && parent == "parents"
+            ));
+        }
+
+        let remaining: i64 =
+            connection.query_row("SELECT COUNT(*) FROM children", [], |row| row.get(0))?;
+        assert_eq!(remaining, 0, "dropping the failed migration rolls it back");
+        Ok(())
+    }
 }

@@ -10,9 +10,9 @@ mod model;
 mod replacement;
 pub mod repository;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-pub use error::{Error, Result};
+pub use error::{Error, ErrorCategory, Result};
 pub use migrations::{APPLICATION_ID, LATEST_SCHEMA_VERSION, MigrationRecord};
 pub use model::*;
 use repository::{Events, Imports, Machines, Profiles, Sessions, Waveforms};
@@ -27,11 +27,13 @@ impl Database {
     /// Opens or creates a database, configures it for local use, and applies all
     /// available schema migrations.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = canonicalize_database_parent(path.as_ref())?;
         let connection = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         Self::from_connection(connection)
     }
@@ -92,6 +94,17 @@ impl Database {
     pub fn imports(&self) -> Imports<'_> {
         Imports::new(&self.connection)
     }
+}
+
+fn canonicalize_database_parent(path: &Path) -> Result<PathBuf> {
+    let file_name = path.file_name().ok_or_else(|| {
+        Error::Integrity("database path must include a final file name".to_owned())
+    })?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    Ok(parent.canonicalize()?.join(file_name))
 }
 
 fn configure(connection: &Connection) -> Result<()> {

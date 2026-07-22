@@ -147,26 +147,52 @@ pub struct NewWaveformChunk<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportStatus {
-    InProgress,
+    Blocked,
+    Running,
     Completed,
     Failed,
+    Cancelled,
 }
 
 impl ImportStatus {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
-            Self::InProgress => "in_progress",
+            Self::Blocked => "blocked",
+            Self::Running => "running",
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
     }
 
     pub(crate) fn from_str(value: &str) -> Option<Self> {
         match value {
-            "in_progress" => Some(Self::InProgress),
+            "blocked" => Some(Self::Blocked),
+            "running" => Some(Self::Running),
             "completed" => Some(Self::Completed),
             "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
             _ => None,
+        }
+    }
+
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+}
+
+/// States in which a new or retried import job may honestly be created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitialImportStatus {
+    Blocked,
+    Running,
+}
+
+impl InitialImportStatus {
+    pub(crate) const fn status(self) -> ImportStatus {
+        match self {
+            Self::Blocked => ImportStatus::Blocked,
+            Self::Running => ImportStatus::Running,
         }
     }
 }
@@ -179,8 +205,13 @@ pub struct ImportHistory {
     pub import_key: String,
     pub source_uri: String,
     pub loader_name: String,
+    pub attempt: i64,
+    pub retry_of_id: Option<i64>,
     pub status: ImportStatus,
-    pub started_at_ms: i64,
+    pub state_message: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub started_at_ms: Option<i64>,
     pub completed_at_ms: Option<i64>,
     pub sessions_created: i64,
     pub sessions_updated: i64,
@@ -197,7 +228,50 @@ pub struct NewImport<'a> {
     pub import_key: &'a str,
     pub source_uri: &'a str,
     pub loader_name: &'a str,
-    pub started_at_ms: i64,
+    pub initial_status: InitialImportStatus,
+    pub state_message: Option<&'a str>,
+    pub created_at_ms: i64,
+}
+
+pub const SOURCE_ID_PREFIX: &str = "opap-source:";
+pub const LEGACY_SOURCE_ID_PREFIX: &str = "opap-source:legacy-";
+
+/// Returns true only for IDs produced by the native source capability registry:
+/// `opap-source:` followed by exactly 32 lowercase hexadecimal characters.
+pub fn is_canonical_source_id(value: &str) -> bool {
+    value.strip_prefix(SOURCE_ID_PREFIX).is_some_and(|suffix| {
+        suffix.len() == 32
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    })
+}
+
+/// Controlled placeholders used only when a pre-privacy-schema record contained
+/// a path. The positive decimal suffix is the stable import-history row id.
+pub fn is_legacy_source_id(value: &str) -> bool {
+    value
+        .strip_prefix(LEGACY_SOURCE_ID_PREFIX)
+        .is_some_and(|suffix| {
+            suffix.len() <= 19
+                && suffix
+                    .as_bytes()
+                    .split_first()
+                    .is_some_and(|(first, rest)| {
+                        matches!(first, b'1'..=b'9') && rest.iter().all(u8::is_ascii_digit)
+                    })
+        })
+}
+
+pub fn is_persistable_source_id(value: &str) -> bool {
+    is_canonical_source_id(value) || is_legacy_source_id(value)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RetryImport<'a> {
+    pub initial_status: InitialImportStatus,
+    pub state_message: Option<&'a str>,
+    pub created_at_ms: i64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -212,6 +286,17 @@ pub struct ImportCounts {
 pub struct BeginImport {
     pub history: ImportHistory,
     pub inserted: bool,
+}
+
+/// Typed state-machine commands. Repository methods enforce each command's
+/// allowed source states in the same SQL statement that persists the change.
+#[derive(Debug, Clone, Copy)]
+pub enum ImportTransition<'a> {
+    Block { at_ms: i64, reason: &'a str },
+    Start { at_ms: i64 },
+    Complete { at_ms: i64, counts: ImportCounts },
+    Fail { at_ms: i64, error: &'a str },
+    Cancel { at_ms: i64, reason: Option<&'a str> },
 }
 
 /// An event in an authoritative replacement of one session's derived data.
@@ -269,4 +354,10 @@ pub struct SessionReplacementStats {
     pub waveforms_written: usize,
     pub waveforms_pruned: usize,
     pub waveform_chunks_written: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionReplacementResult {
+    pub session: Session,
+    pub stats: SessionReplacementStats,
 }

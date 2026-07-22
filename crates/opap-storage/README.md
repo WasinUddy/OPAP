@@ -4,11 +4,18 @@
 uses domain-neutral data-transfer objects so importers and user interfaces can
 depend on storage without coupling storage to a particular device parser.
 
-The database enables foreign-key enforcement, applies numbered migrations on
-open, and supports atomic importer transactions through `Database::transaction`.
-`Database::replace_session_data` is the authoritative re-import path: it
-validates complete waveform coverage and atomically prunes events, waveforms,
-and chunks that disappeared from a newly parsed session.
+The database rejects symlinked database files, enables foreign-key enforcement,
+applies numbered migrations on open, and verifies both migration metadata and
+referential integrity before use. It supports atomic importer transactions
+through `Database::transaction`. `Database::replace_session` is the
+authoritative re-import path: it writes session metadata and derived data
+together, validates complete waveform coverage, and atomically prunes events,
+waveforms, and chunks that disappeared from a newly parsed session.
+
+Import jobs persist explicit `blocked`, `running`, `completed`, `failed`, and
+`cancelled` states. Interrupted running jobs recover to blocked, while retries
+create time-ordered linked attempts so terminal history is never rewritten.
+Persisted import sources are opaque identifiers rather than filesystem paths.
 
 ```sh
 rustup run stable cargo test --manifest-path crates/opap-storage/Cargo.toml
