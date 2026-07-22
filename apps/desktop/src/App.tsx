@@ -1,6 +1,8 @@
 import { Center, Loader, Text } from '@mantine/core';
-import { lazy, Suspense } from 'react';
+import { lazy, type ReactNode, Suspense } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
+import type { OpapClient } from './client';
+import { OpapClientProvider } from './client';
 import { AppFrame } from './components/AppFrame';
 
 const DailyPage = lazy(() => import('./pages/DailyPage').then((module) => ({ default: module.DailyPage })));
@@ -17,18 +19,22 @@ function RouteLoading() {
   );
 }
 
-export function App() {
+function LazyScreen({ children }: { children: ReactNode }) {
+  return <Suspense fallback={<RouteLoading />}>{children}</Suspense>;
+}
+
+export function App({ client }: { client?: OpapClient }) {
   return (
-    <Suspense fallback={<RouteLoading />}>
+    <OpapClientProvider client={client}>
       <Routes>
         <Route element={<AppFrame />}>
-          <Route index element={<OverviewPage />} />
-          <Route path="daily" element={<DailyPage />} />
-          <Route path="import" element={<ImportPage />} />
-          <Route path="settings" element={<SettingsPage />} />
+          <Route index element={<LazyScreen><OverviewPage /></LazyScreen>} />
+          <Route path="daily" element={<LazyScreen><DailyPage /></LazyScreen>} />
+          <Route path="import" element={<LazyScreen><ImportPage /></LazyScreen>} />
+          <Route path="settings" element={<LazyScreen><SettingsPage /></LazyScreen>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
-    </Suspense>
+    </OpapClientProvider>
   );
 }

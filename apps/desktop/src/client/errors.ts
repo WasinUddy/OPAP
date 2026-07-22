@@ -4,7 +4,7 @@
 import { API_ERROR_CODES, type ApiError, type ApiErrorCode } from './contracts';
 
 const apiErrorCodes = new Set<string>(API_ERROR_CODES);
-const safeErrorFields = new Set(['display_name', 'profile_id', 'job_id', 'request_key', 'source_id']);
+const safeErrorFields = new Set(['display_name', 'profile_id', 'job_id', 'source_id']);
 
 const safeErrorMessages: Record<ApiErrorCode, string> = {
   invalid_request: 'The request is invalid.',

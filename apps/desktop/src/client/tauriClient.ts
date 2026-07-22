@@ -66,16 +66,6 @@ export function createTauriOpapClient(invoke: TauriInvoke): OpapClient {
           }),
         );
       }
-      if (!isValidRequestKey(request.request_key)) {
-        return Promise.reject(
-          normalizeApiError({
-            code: 'invalid_request',
-            message: 'Request key is invalid.',
-            retryable: false,
-            field: 'request_key',
-          }),
-        );
-      }
       return call(TAURI_COMMANDS.prepareImportJob, decodePrepareImportJobResponse, { request });
     },
     listImportJobs: (profileId: number) =>
@@ -95,8 +85,4 @@ export function createTauriOpapClient(invoke: TauriInvoke): OpapClient {
     cancelImportJob: (profileId: number, jobId: number) =>
       call(TAURI_COMMANDS.cancelImportJob, decodeImportJob, { profileId, jobId }),
   };
-}
-
-function isValidRequestKey(value: string): boolean {
-  return value.length <= 200 && /^[A-Za-z0-9_.:-]+$/.test(value);
 }

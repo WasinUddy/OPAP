@@ -68,10 +68,9 @@ select {
   padding: 28px clamp(20px, 2.8vw, 42px) 52px;
 }
 
-.demo-banner {
-  position: sticky;
+.runtime-banner {
+  position: relative;
   z-index: 90;
-  top: 72px;
   display: flex;
   min-height: 43px;
   padding: 8px 20px;
@@ -80,6 +79,30 @@ select {
   justify-content: center;
   color: #533b0d;
   background: #fff7df;
+}
+
+.runtime-banner-loading {
+  border-bottom-color: #cbd2d9;
+  color: #3e4853;
+  background: #f4f6f8;
+}
+
+.runtime-banner-error {
+  border-bottom-color: #efabab;
+  color: #7c2525;
+  background: #fff1f1;
+}
+
+.runtime-banner-tauri {
+  border-bottom-color: #9bc9eb;
+  color: #13496f;
+  background: #eef8ff;
+}
+
+.runtime-banner-unavailable {
+  border-bottom-color: #efabab;
+  color: #7c2525;
+  background: #fff1f1;
 }
 
 .header-eyebrow {
@@ -516,9 +539,14 @@ select {
   transition: border-color 150ms ease, background-color 150ms ease;
 }
 
-.drop-zone:hover {
+.drop-zone:hover:not(:disabled) {
   border-color: #62b3ef;
   background: #f6fbff;
+}
+
+.drop-zone:disabled {
+  cursor: wait;
+  opacity: 0.72;
 }
 
 .drop-zone-button {
@@ -600,12 +628,11 @@ select {
     padding: 20px 16px 98px;
   }
 
-  .demo-banner {
-    top: 72px;
+  .runtime-banner {
     padding-inline: 12px;
   }
 
-  .demo-banner .mantine-Badge-root {
+  .runtime-banner .mantine-Badge-root {
     flex: 0 0 auto;
   }
 

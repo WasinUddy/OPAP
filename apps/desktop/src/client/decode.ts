@@ -82,7 +82,6 @@ export function decodeImportJob(value: unknown): ImportJobDto {
   return {
     id: integer(object.id, 'id'),
     profile_id: integer(object.profile_id, 'profile_id'),
-    request_key: string(object.request_key, 'request_key'),
     attempt: integer(object.attempt, 'attempt'),
     ...optional(object, 'retry_of_id', integer),
     source_id: opaqueSourceId(object.source_id),
@@ -125,11 +124,11 @@ function decodeImporter(value: unknown): ImporterCapability {
 function decodeDevice(value: unknown): DeviceDto {
   const object = record(value, 'device');
   return {
-    brand: string(object.brand, 'brand'),
-    model: string(object.model, 'model'),
-    model_number: string(object.model_number, 'model_number'),
+    brand: safeText(object.brand, 'brand'),
+    model: safeText(object.model, 'model'),
+    model_number: safeText(object.model_number, 'model_number'),
     serial_suffix: serialSuffix(object.serial_suffix),
-    series: string(object.series, 'series'),
+    series: safeText(object.series, 'series'),
   };
 }
 

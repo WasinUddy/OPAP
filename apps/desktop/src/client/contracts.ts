@@ -9,7 +9,7 @@
  * `crates/opap-service/src/error.rs`.
  */
 
-export const OPAP_API_SCHEMA_VERSION = 1 as const;
+export const OPAP_API_SCHEMA_VERSION = 2 as const;
 
 export interface AppBootstrap {
   api_schema_version: number;
@@ -86,7 +86,6 @@ export interface PrepareImportJobRequest {
   profile_id: number;
   /** Opaque handle returned by native source selection. */
   source_id: string;
-  request_key: string;
 }
 
 export interface PrepareImportJobResponse {
@@ -108,7 +107,6 @@ export interface ImportJobCounts {
 export interface ImportJobDto {
   id: number;
   profile_id: number;
-  request_key: string;
   attempt: number;
   retry_of_id?: number;
   source_id: string;

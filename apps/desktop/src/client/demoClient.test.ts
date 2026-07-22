@@ -30,7 +30,7 @@ describe('demo OPAP client', () => {
     const client = createDemoOpapClient();
     const source = await client.selectNativeSource();
     if (!source) throw new Error('The built-in demo source must exist.');
-    const request = { profile_id: 1, source_id: source.source_id, request_key: 'demo-request-1' };
+    const request = { profile_id: 1, source_id: source.source_id };
 
     const first = await client.prepareImportJob(request);
     const repeated = await client.prepareImportJob(request);
@@ -62,7 +62,7 @@ describe('demo OPAP client', () => {
     });
     await expect(client.listImportJobs(999)).rejects.toMatchObject({ code: 'profile_not_found' });
     await expect(
-      client.prepareImportJob({ profile_id: 1, source_id: 'not-a-handle', request_key: 'demo' }),
+      client.prepareImportJob({ profile_id: 1, source_id: 'not-a-handle' }),
     ).rejects.toMatchObject({ code: 'source_unavailable', field: 'source_id' });
   });
 });

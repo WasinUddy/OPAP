@@ -30,7 +30,7 @@ export function createDemoOpapClient(): OpapClient {
     runtime: 'demo',
     async bootstrap(): Promise<AppBootstrap> {
       return {
-        api_schema_version: 1,
+        api_schema_version: 2,
         import_report_schema_version: 1,
         storage_schema_version: 0,
         capabilities: {
@@ -87,7 +87,7 @@ export function createDemoOpapClient(): OpapClient {
         });
       }
       const existing = jobs.find(
-        (job) => job.profile_id === request.profile_id && job.request_key === request.request_key,
+        (job) => job.profile_id === request.profile_id && job.source_id === request.source_id,
       );
       if (existing) return { job: clone(existing), created: false };
 
@@ -162,7 +162,6 @@ function demoJob(id: number, request: PrepareImportJobRequest): ImportJobDto {
   return {
     id,
     profile_id: request.profile_id,
-    request_key: request.request_key,
     attempt: 1,
     source_id: DEMO_SOURCE_ID,
     source_label: 'Built-in demo source · fabricated sample',

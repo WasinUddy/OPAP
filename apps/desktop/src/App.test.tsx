@@ -1,15 +1,17 @@
 import { MantineProvider } from '@mantine/core';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { App } from './App';
+import type { AppBootstrap, OpapClient } from './client';
+import { createDemoOpapClient } from './client';
 import { theme } from './theme';
 
-function renderApp(path = '/') {
+function renderApp(path = '/', client?: OpapClient) {
   return render(
     <MantineProvider theme={theme}>
       <MemoryRouter initialEntries={[path]}>
-        <App />
+        <App client={client} />
       </MemoryRouter>
     </MantineProvider>,
   );
@@ -20,7 +22,8 @@ describe('OPAP desktop shell', () => {
     renderApp();
 
     const demoNotice = await screen.findByRole('note', { name: 'Demo data notice' });
-    expect(demoNotice).toHaveTextContent('Every clinical value and import result shown is fabricated');
+    expect(demoNotice).toHaveTextContent('Every clinical value, source, and import job shown is fabricated');
+    expect(demoNotice).toHaveTextContent('No CPAP card or local file is read');
     expect((await screen.findAllByText('7h 42m')).length).toBeGreaterThan(0);
     expect(screen.getByRole('img', { name: /Sample AHI trend/i })).toBeInTheDocument();
     expect(screen.getByText('Sample usage consistency')).toBeInTheDocument();
@@ -63,5 +66,46 @@ describe('OPAP desktop shell', () => {
       'href',
       'https://github.com/WasinUddy/OPAP',
     );
+  });
+
+  it('keeps the fabricated browser disclosure visible while capabilities load', async () => {
+    const demo = createDemoOpapClient();
+    let resolveBootstrap: (value: AppBootstrap) => void = () => undefined;
+    const pendingBootstrap = new Promise<AppBootstrap>((resolve) => {
+      resolveBootstrap = resolve;
+    });
+    renderApp('/', { ...demo, bootstrap: () => pendingBootstrap });
+
+    expect(screen.getByRole('note', { name: 'Demo data notice' })).toHaveTextContent(
+      'Every clinical value, source, and import job shown is fabricated',
+    );
+    expect(screen.getByText('Browser demo')).toBeInTheDocument();
+
+    await act(async () => {
+      resolveBootstrap(await demo.bootstrap());
+    });
+  });
+
+  it('surfaces a native bootstrap failure without falling back or exposing error details', async () => {
+    const unavailable = vi.fn(async () => {
+      throw new Error('failed at /Users/alice/private/opap.db');
+    });
+    const client: OpapClient = {
+      runtime: 'tauri',
+      bootstrap: unavailable,
+      listProfiles: unavailable,
+      createProfile: unavailable,
+      selectNativeSource: unavailable,
+      prepareImportJob: unavailable,
+      listImportJobs: unavailable,
+      getImportJob: unavailable,
+      cancelImportJob: unavailable,
+    };
+    renderApp('/import', client);
+
+    const runtimeAlert = await screen.findByRole('alert', { name: 'Runtime status' });
+    expect(runtimeAlert).toHaveTextContent('The native OPAP service returned an unexpected error.');
+    expect(document.body).not.toHaveTextContent('/Users/alice');
+    expect(screen.queryByRole('note', { name: 'Demo data notice' })).not.toBeInTheDocument();
   });
 });

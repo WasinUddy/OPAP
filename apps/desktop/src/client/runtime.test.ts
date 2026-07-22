@@ -6,7 +6,7 @@ import { selectOpapClient, type OpapRuntimeWindow } from './runtime';
 describe('OPAP client runtime selection', () => {
   it('selects the Tauri client when native IPC is available', async () => {
     const invoke = vi.fn().mockResolvedValue({
-      api_schema_version: 1,
+      api_schema_version: 2,
       import_report_schema_version: 1,
       storage_schema_version: 4,
       capabilities: {

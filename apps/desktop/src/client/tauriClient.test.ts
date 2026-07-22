@@ -33,7 +33,6 @@ const INSPECTION = {
 const JOB = {
   id: 11,
   profile_id: 7,
-  request_key: 'request-1',
   attempt: 1,
   source_id: INSPECTION.source_id,
   source_label: 'ResMed SD card',
@@ -53,7 +52,7 @@ const JOB = {
 };
 
 const BOOTSTRAP = {
-  api_schema_version: 1,
+  api_schema_version: 2,
   import_report_schema_version: 1,
   storage_schema_version: 4,
   capabilities: {
@@ -108,7 +107,6 @@ describe('Tauri OPAP client', () => {
     await client.prepareImportJob({
       profile_id: 7,
       source_id: INSPECTION.source_id,
-      request_key: 'request-1',
     });
     await client.listImportJobs(7);
     await client.getImportJob(7, 11);
@@ -125,7 +123,6 @@ describe('Tauri OPAP client', () => {
           request: {
             profile_id: 7,
             source_id: INSPECTION.source_id,
-            request_key: 'request-1',
           },
         },
       },
@@ -154,16 +151,8 @@ describe('Tauri OPAP client', () => {
       client.prepareImportJob({
         profile_id: 7,
         source_id: '/Users/person/private/SDCARD',
-        request_key: 'request-1',
       }),
     ).rejects.toMatchObject({ code: 'invalid_request', field: 'source_id' });
-    await expect(
-      client.prepareImportJob({
-        profile_id: 7,
-        source_id: INSPECTION.source_id,
-        request_key: '../../private/card',
-      }),
-    ).rejects.toMatchObject({ code: 'invalid_request', field: 'request_key' });
     expect(invoke).not.toHaveBeenCalled();
   });
 
@@ -181,6 +170,21 @@ describe('Tauri OPAP client', () => {
     expect(inspection).not.toHaveProperty('path');
     expect(inspection).not.toHaveProperty('source_path');
     expect(inspection?.device).not.toHaveProperty('serial');
+  });
+
+  it('drops legacy request keys from import job responses', async () => {
+    const invoke: TauriInvoke = async () => ({
+      job: { ...JOB, request_key: 'opap-request:full-device-serial-leak' },
+      created: true,
+    });
+
+    const response = await createTauriOpapClient(invoke).prepareImportJob({
+      profile_id: 7,
+      source_id: INSPECTION.source_id,
+    });
+
+    expect(response.job).not.toHaveProperty('request_key');
+    expect(JSON.stringify(response)).not.toContain('full-device-serial-leak');
   });
 
   it('preserves a valid service ApiError as a typed OpapApiError', async () => {
@@ -228,7 +232,7 @@ describe('Tauri OPAP client', () => {
   });
 
   it('fails closed on unsupported API versions and non-Serde optional nulls', async () => {
-    const unsupportedVersion: TauriInvoke = async () => ({ ...BOOTSTRAP, api_schema_version: 2 });
+    const unsupportedVersion: TauriInvoke = async () => ({ ...BOOTSTRAP, api_schema_version: 3 });
     await expect(createTauriOpapClient(unsupportedVersion).bootstrap()).rejects.toMatchObject({
       code: 'internal',
     });
@@ -274,5 +278,15 @@ describe('Tauri OPAP client', () => {
     await expect(createTauriOpapClient(fullSerial).selectNativeSource()).rejects.toMatchObject({
       code: 'internal',
     });
+
+    for (const field of ['brand', 'model', 'model_number', 'series'] as const) {
+      const unsafeDeviceText: TauriInvoke = async () => ({
+        ...INSPECTION,
+        device: { ...INSPECTION.device, [field]: '/Users/alice/private/card' },
+      });
+      await expect(createTauriOpapClient(unsafeDeviceText).selectNativeSource()).rejects.toMatchObject({
+        code: 'internal',
+      });
+    }
   });
 });
