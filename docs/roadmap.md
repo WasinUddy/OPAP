@@ -4,6 +4,25 @@ Each milestone is complete only when its gate passes on supported desktop
 platforms. Functional tests use synthetic public fixtures; private OSCAR
 conformance data remains outside Git.
 
+## Status snapshot (2026-07-23)
+
+No milestone below is complete yet, and there is no supported desktop release.
+The current repository has:
+
+- the Rust workspace, pinned OSCAR-SQL provenance, GPL/privacy policies, and CI;
+- bounded ResMed card detection and machine identification, but no session
+  importer;
+- an independent hardened EDF/EDF+ parser that is not yet connected to ResMed
+  sessions;
+- versioned transactional SQLite storage without an end-to-end clinical import;
+- a responsive Mantine interface populated only by clearly labeled fabricated
+  data; and
+- experimental service and Tauri boundaries that are not connected to that UI
+  and cannot execute session imports.
+
+The present wiring and missing links are detailed in
+[Architecture and integration status](architecture.md).
+
 ## 0. Foundation
 
 Establish the Rust workspace, pinned OSCAR-SQL baseline, GPL notices, CI, and

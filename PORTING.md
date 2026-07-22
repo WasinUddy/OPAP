@@ -16,10 +16,15 @@ status so translated behavior remains reviewable.
 | OPAP module | OSCAR reference | Status |
 | --- | --- | --- |
 | `opap_core::resmed` | `resmed_loader.cpp`: `Detect`, `PeekInfo`, `parseIdentFile`, `parseIdentLine`, `scanProductObject` | Detection and identification ported |
-| `opap-edf` | `edfparser.h`, `edfparser.cpp`, `resmed_EDFinfo.*` | Generic parser in progress |
+| `opap-edf` | `edfparser.h`, `edfparser.cpp`, `resmed_EDFinfo.*` | Generic EDF/EDF+ parser implemented and independently tested; ResMed integration not started |
 | ResMed session importer | `resmed_loader.cpp`: `Open`, `ScanFiles`, `ResDayTask`, `LoadBRP`, `LoadPLD`, `LoadSAD`, `LoadEVE`, `LoadCSL` | Planned |
 | Session compatibility manifest | `tests/resmedtests.cpp`, `tests/sessiontests.cpp` | Schema and oracle harness planned |
 | Derived calculations | `calcs.*`, `session.*` | Planned after import parity |
+
+The parser, importer, storage, service, native host, and UI are not an
+end-to-end pipeline yet. The current CLI stops after machine identification;
+`ResmedImporter::import` deliberately reports an unsupported operation. See
+[`docs/architecture.md`](docs/architecture.md) for the wiring status.
 
 ## Porting rules
 
@@ -61,4 +66,3 @@ status so translated behavior remains reviewable.
 OPAP is based on OSCAR and on the free and open-source software SleepyHead,
 developed and copyrighted by Mark Watkins (C) 2011-2018. Portions of OSCAR are
 copyright (C) 2019-2026 The OSCAR Team. See `README.md` and `COPYING`.
-
