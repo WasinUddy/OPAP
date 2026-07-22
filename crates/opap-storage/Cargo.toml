@@ -1,0 +1,16 @@
+[package]
+name = "opap-storage"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-only"
+description = "Local SQLite persistence for OPAP"
+repository = "https://github.com/WasinUddy/OPAP"
+readme = "README.md"
+
+[dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3.20"
