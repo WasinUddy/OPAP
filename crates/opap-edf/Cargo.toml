@@ -1,0 +1,19 @@
+[package]
+name = "opap-edf"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-only"
+description = "Safe, dependency-free EDF/EDF+ parsing for OPAP"
+repository = "https://github.com/WasinUddy/OPAP"
+readme = "README.md"
+
+[lib]
+path = "src/lib.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
