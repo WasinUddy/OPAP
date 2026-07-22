@@ -15,6 +15,7 @@ default = ["native-fs"]
 native-fs = ["dep:cap-fs-ext", "dep:cap-std"]
 
 [dependencies]
+opap-edf = { version = "0.1.0", path = "../opap-edf" }
 serde.workspace = true
 serde_json.workspace = true
 

@@ -11,7 +11,8 @@
 // oscar/SleepLib/loader_plugins/resmed_loader.h
 // Modified: 2026-07-22
 
-//! ResMed card detection, identification parsing, and source inventory.
+//! ResMed card detection, identification parsing, source inventory, and
+//! bounded session-candidate indexing.
 //!
 //! Behavioral reference: OSCAR-SQL `resmed_loader.cpp` at the revision pinned
 //! in `compat/oscar-sql-revision.txt`.
@@ -35,6 +36,16 @@ const DATALOG: &str = "DATALOG";
 const STR_EDF: &str = "STR.edf";
 const IDENT_TGT: &str = "Identification.tgt";
 const IDENT_JSON: &str = "Identification.json";
+
+mod session_index;
+
+pub use session_index::{
+    RESMED_EDF_HEADER_MAX_BYTES, RESMED_SESSION_INDEX_MAX_ENTRIES,
+    RESMED_SESSION_INDEX_MAX_PATH_BYTES, RESMED_SESSION_INDEX_SCHEMA_VERSION,
+    ResmedDeviceLocalTime, ResmedEdfHeaderSummary, ResmedSessionCandidate, ResmedSessionFile,
+    ResmedSessionFileKind, ResmedSessionFileScope, ResmedSessionIndex, ResmedTimestampSource,
+    index_session_candidates, index_session_candidates_from_inventory,
+};
 
 /// Stable identifier used by the ResMed importer.
 pub const IMPORTER_ID: &str = "resmed";
@@ -96,8 +107,8 @@ pub struct CardDiscovery {
 
 /// Filesystem-independent ResMed importer.
 ///
-/// Discovery and inventory are implemented. Session EDF parsing is added in a
-/// later porting phase and currently returns
+/// Discovery, inventory, and bounded EDF header indexing are implemented.
+/// Clinical channel decoding is added in a later porting phase and currently returns
 /// [`ImportErrorKind::UnsupportedOperation`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ResmedImporter;
@@ -299,7 +310,7 @@ impl Importer for ResmedImporter {
 
         Err(ImportError::new(
             ImportErrorKind::UnsupportedOperation,
-            "ResMed session EDF parsing is not implemented yet",
+            "ResMed clinical session decoding and import are not implemented yet",
         ))
     }
 }

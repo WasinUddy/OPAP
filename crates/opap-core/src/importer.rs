@@ -261,6 +261,22 @@ pub trait ImportSource {
     /// Importers should still verify the returned length so an untrusted source
     /// adapter cannot bypass parser-specific limits.
     fn read_file(&self, relative_path: &str, max_bytes: usize) -> Result<Vec<u8>, ImportError>;
+
+    /// Reads at most the first `max_bytes` of one source-relative file.
+    ///
+    /// Header-only probes should use this method instead of [`Self::read_file`]
+    /// so large waveform files do not need to be copied into memory. The
+    /// default implementation preserves compatibility with simple in-memory
+    /// adapters whose files already fit within the requested bound. Native and
+    /// browser adapters should override it to provide a true bounded prefix
+    /// read.
+    fn read_file_prefix(
+        &self,
+        relative_path: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ImportError> {
+        self.read_file(relative_path, max_bytes)
+    }
 }
 
 /// Import options shared by device loaders.
@@ -451,6 +467,37 @@ impl ImportSource for DirectorySource {
                 u64::try_from(bytes.len()).ok(),
             ));
         }
+        Ok(bytes)
+    }
+
+    fn read_file_prefix(
+        &self,
+        relative_path: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ImportError> {
+        let path = safe_relative_path(relative_path)?;
+        let file = self
+            .open_file_nofollow(path)
+            .map_err(|source| self.io_error(source, Some(relative_path)))?;
+        let metadata = file
+            .metadata()
+            .map_err(|source| self.io_error(source, Some(relative_path)))?;
+        if !metadata.is_file() {
+            return Err(ImportError::new(
+                ImportErrorKind::InvalidPath,
+                "source path does not identify a regular file",
+            )
+            .at_path(relative_path));
+        }
+
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(metadata.len())
+                .unwrap_or(max_bytes)
+                .min(max_bytes),
+        );
+        file.take(u64::try_from(max_bytes).unwrap_or(u64::MAX))
+            .read_to_end(&mut bytes)
+            .map_err(|source| self.io_error(source, Some(relative_path)))?;
         Ok(bytes)
     }
 }
@@ -728,6 +775,12 @@ mod tests {
         let source = DirectorySource::open(root.path()).expect("open source");
 
         assert_eq!(source.read_file("file.edf", 8).expect("read"), b"contents");
+        assert_eq!(
+            source
+                .read_file_prefix("file.edf", 3)
+                .expect("bounded prefix"),
+            b"con"
+        );
         let error = source
             .read_file("file.edf", 7)
             .expect_err("enforce size limit");

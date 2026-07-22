@@ -233,6 +233,7 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
+ "opap-edf",
  "serde",
  "serde_json",
  "tempfile",
