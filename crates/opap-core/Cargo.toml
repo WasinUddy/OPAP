@@ -5,10 +5,22 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "opap-core"
+path = "src/main.rs"
+required-features = ["native-fs"]
+
+[features]
+default = ["native-fs"]
+native-fs = ["dep:cap-fs-ext", "dep:cap-std"]
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+cap-fs-ext = { version = "4.0.2", optional = true }
+cap-std = { version = "4.0.2", optional = true }
+
 [dev-dependencies]
 tempfile.workspace = true
-

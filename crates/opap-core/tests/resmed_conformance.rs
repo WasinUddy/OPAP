@@ -1,3 +1,15 @@
+// Copyright (C) 2011-2018 Mark Watkins
+// Copyright (C) 2019-2026 The OSCAR Team
+// Copyright (C) 2026 OPAP contributors
+// SPDX-License-Identifier: GPL-3.0-only
+//
+// Ported and modified from the OSCAR-SQL ResMed conformance-test approach:
+// https://gitlab.com/CrimsonNape/OSCAR-SQL
+// Upstream commit: 3741e5b423e4b5796c51a9d447e83b2525963d50
+// Relevant upstream files: oscar/tests/resmedtests.cpp,
+// oscar/tests/sessiontests.cpp
+// Modified: 2026-07-22
+
 use opap_core::resmed::{MachineInfo, detect_card, read_machine_info};
 use std::env;
 use std::fs;
