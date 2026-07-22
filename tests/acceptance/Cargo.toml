@@ -1,0 +1,29 @@
+[package]
+name = "opap-acceptance"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+rust-version = "1.85"
+publish = false
+
+[dependencies]
+cucumber = "0.21.1"
+opap-core = { path = "../../crates/opap-core" }
+serde_json = "1.0"
+tempfile = "3.20"
+tokio = { version = "1.45", features = ["macros", "rt-multi-thread"] }
+
+[[bin]]
+name = "opap-core-acceptance-cli"
+path = "../../crates/opap-core/src/main.rs"
+test = false
+bench = false
+
+[[test]]
+name = "resmed_acceptance"
+path = "tests/resmed_acceptance.rs"
+harness = false
+
+# Keep this acceptance harness independently runnable without adding it to the
+# application workspace.
+[workspace]

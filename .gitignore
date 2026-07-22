@@ -1,8 +1,16 @@
-/target/
+target/
+**/target/
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+coverage/
+**/coverage/
+playwright-report/
+test-results/
 /.idea/
 /.vscode/
 .DS_Store
 
 # CPAP exports can contain sensitive health information. Test cards stay local.
 /testdata/private/
-
