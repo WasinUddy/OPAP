@@ -10,6 +10,11 @@ name = "opap-core"
 path = "src/main.rs"
 required-features = ["native-fs"]
 
+[[test]]
+name = "resmed_manual_expectations"
+path = "tests/resmed_manual_expectations.rs"
+required-features = ["native-fs"]
+
 [features]
 default = ["native-fs"]
 native-fs = ["dep:cap-fs-ext", "dep:cap-std"]

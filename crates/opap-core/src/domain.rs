@@ -3,12 +3,12 @@
 // Copyright (C) 2026 OPAP contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// Ported and modified from OSCAR-SQL concepts:
-// https://gitlab.com/CrimsonNape/OSCAR-SQL
-// Upstream commit: 3741e5b423e4b5796c51a9d447e83b2525963d50
-// Relevant upstream files: oscar/SleepLib/machine.h,
-// oscar/SleepLib/session.h, oscar/SleepLib/eventlist.h
-// Modified: 2026-07-22
+// Ported and modified from OSCAR concepts:
+// https://gitlab.com/CrimsonNape/OSCAR-code
+// Upstream commit: 64c5e90a26f91fb15868bcfcccde0c1e1522ac86
+// Relevant upstream files: oscar/SleepLib/machine_common.h, oscar/SleepLib/machine.h,
+// oscar/SleepLib/session.h, oscar/SleepLib/event.h
+// Modified: 2026-07-23
 
 //! Serializable domain types shared by importers and application frontends.
 //!
@@ -19,7 +19,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Current version of the serialized import report contract.
-pub const IMPORT_SCHEMA_VERSION: u16 = 2;
+pub const IMPORT_SCHEMA_VERSION: u16 = 3;
 
 /// A timestamp expressed as milliseconds since the Unix epoch in UTC.
 pub type UnixMillis = i64;
@@ -32,8 +32,18 @@ pub type UnixMillis = i64;
 pub struct MachineInfo {
     /// Device manufacturer, for example `ResMed`.
     pub brand: String,
-    /// Human-readable product name.
+    /// Human-readable display product name, normalized where the source format
+    /// requires it.
     pub model: String,
+    /// Manufacturer product-name value before OPAP display normalization.
+    ///
+    /// ResMed JSON preserves the decoded `ProductName` string verbatim without
+    /// trimming. Legacy TGT preserves the trimmed `PNA` value, including its
+    /// source underscores/parentheses.
+    /// Empty means the source supplied no product name. `serde(default)` keeps
+    /// schema-v2 records readable while schema v3 writes the explicit field.
+    #[serde(default)]
+    pub source_model: String,
     /// Manufacturer product code.
     pub model_number: String,
     /// Manufacturer serial number.
@@ -47,6 +57,7 @@ impl Default for MachineInfo {
         Self {
             brand: "ResMed".to_owned(),
             model: String::new(),
+            source_model: String::new(),
             model_number: String::new(),
             serial: String::new(),
             series: String::new(),
@@ -311,6 +322,7 @@ mod tests {
             machine: MachineInfo {
                 brand: "ResMed".to_owned(),
                 model: "AirSense 11 AutoSet".to_owned(),
+                source_model: "AirSense11 AutoSet".to_owned(),
                 model_number: "39001".to_owned(),
                 serial: "123".to_owned(),
                 series: "AirSense 11".to_owned(),
@@ -330,6 +342,24 @@ mod tests {
 
         assert_eq!(decoded, report);
         assert_eq!(decoded.schema_version, IMPORT_SCHEMA_VERSION);
+        assert_eq!(decoded.schema_version, 3);
+        assert_eq!(decoded.device.machine.source_model, "AirSense11 AutoSet");
+    }
+
+    #[test]
+    fn schema_v2_machine_identity_defaults_the_new_source_model() {
+        let legacy = json!({
+            "brand": "ResMed",
+            "model": "AirSense 10 AutoSet",
+            "model_number": "37028",
+            "serial": "123",
+            "series": "AirSense 10"
+        });
+
+        let decoded: MachineInfo =
+            serde_json::from_value(legacy).expect("deserialize schema-v2 machine identity");
+        assert_eq!(decoded.model, "AirSense 10 AutoSet");
+        assert!(decoded.source_model.is_empty());
     }
 
     #[test]

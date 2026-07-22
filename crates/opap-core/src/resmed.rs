@@ -3,27 +3,47 @@
 // Copyright (C) 2026 OPAP contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// Ported and modified from OSCAR-SQL:
-// https://gitlab.com/CrimsonNape/OSCAR-SQL
-// Upstream commit: 3741e5b423e4b5796c51a9d447e83b2525963d50
+// Ported and modified from OSCAR:
+// https://gitlab.com/CrimsonNape/OSCAR-code
+// Upstream commit: 64c5e90a26f91fb15868bcfcccde0c1e1522ac86
 // Relevant upstream files:
 // oscar/SleepLib/loader_plugins/resmed_loader.cpp
 // oscar/SleepLib/loader_plugins/resmed_loader.h
-// Modified: 2026-07-22
+// Modified: 2026-07-23
 
 //! ResMed card detection, identification parsing, source inventory, and
 //! bounded session-candidate indexing.
 //!
-//! Behavioral reference: OSCAR-SQL `resmed_loader.cpp` at the revision pinned
-//! in `compat/oscar-sql-revision.txt`.
+//! The primary behavioral reference is OSCAR-code `resmed_loader.cpp` at commit
+//! `64c5e90a26f91fb15868bcfcccde0c1e1522ac86`.
+//!
+//! OPAP deliberately corrects OSCAR's narrow product-family inference while
+//! preserving source identity strings wherever [`MachineInfo`] has a raw field.
+//! It also leaves an absent family empty instead of inheriting OSCAR's `S9`
+//! default. See the identification parser comments and `opap_correction_*`
+//! tests for the exact boundary.
+//! Identification reads are additionally capped at 64 KiB. Legacy TGT input
+//! must be UTF-8, uses literal `#KEY value` records, trims outer value
+//! whitespace, and ignores key-only records rather than clearing an earlier
+//! value. These are intentional bounded-input hardening differences from Qt's
+//! permissive text reader and `QString::section` behavior.
+//!
+//! Detection here mirrors only OSCAR's lightweight `Detect` signature check.
+//! It is not OSCAR `Open` import readiness: the latter also normalizes a
+//! selected `DATALOG` path to its card root, accepts `STR.edf.gz`, requires a
+//! parsed identification with a non-empty serial, and attempts to use only STR
+//! summary data that parses and matches that serial. A bad STR can be omitted
+//! while OSCAR continues with DATALOG detail files, so STR verification is not
+//! itself an unconditional `Open` rejection gate. OPAP does not import either
+//! summary or detail sessions yet.
 
 use crate::domain::{DeviceInfo, ImportWarning, WarningSeverity};
-#[cfg(all(feature = "native-fs", not(target_family = "wasm")))]
-use crate::importer::DirectorySource;
 use crate::importer::{
     DeviceDiscovery, ImportError, ImportErrorKind, ImportOptions, ImportSource, Importer,
     SourceEntryKind, SourceInventory,
 };
+#[cfg(all(feature = "native-fs", not(target_family = "wasm")))]
+use crate::importer::{DirectorySource, SourceEntry};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(all(feature = "native-fs", not(target_family = "wasm")))]
@@ -66,7 +86,8 @@ pub enum CardFileRole {
     Summary,
     /// High-resolution `_BRP.edf` signal data.
     Waveform,
-    /// `_EVE.edf`, `_CSL.edf`, or `_AEV.edf` annotations.
+    /// Event annotations (`EVE`), Cheyne-Stokes respiration intervals (`CSL`),
+    /// or currently unsupported `AEV` annotations.
     Events,
     /// Other recognized EDF detail data, including PLD and oximetry.
     Detail,
@@ -176,23 +197,33 @@ impl std::error::Error for Error {
     }
 }
 
-/// Matches OSCAR's ResMed detection rule: a directory containing both
-/// `DATALOG/` and `STR.edf` is a ResMed card.
+/// Applies OSCAR-code `Detect`'s root signature rule with bounded, no-follow
+/// native access: the selected directory must contain literal `DATALOG/` and
+/// an uncompressed `STR.edf`.
+///
+/// This is a signature check, not import readiness. In particular it does not
+/// parse identification, require a serial, attempt OSCAR's verified-STR summary
+/// path, or accept a selected `DATALOG/` path or `STR.edf.gz` as `Open` does.
 #[cfg(all(feature = "native-fs", not(target_family = "wasm")))]
 pub fn detect_card(path: impl AsRef<Path>) -> bool {
     let path = path.as_ref();
-    DirectorySource::open(path)
-        .and_then(|source| source.inventory())
-        .is_ok_and(|inventory| is_resmed_inventory(&inventory))
+    DirectorySource::open(path).is_ok_and(|source| {
+        source
+            .has_direct_entry(DATALOG, SourceEntryKind::Directory)
+            .is_ok_and(|present| present)
+            && source
+                .has_direct_entry(STR_EDF, SourceEntryKind::File)
+                .is_ok_and(|present| present)
+    })
 }
 
-/// Reads machine metadata, preferring AirSense 11 `Identification.json` when
-/// both JSON and the legacy TGT file are present, as OSCAR does.
+/// Reads machine metadata, preferring `Identification.json` when both it and
+/// the legacy TGT file are present, matching the pinned OSCAR-code loader.
 #[cfg(all(feature = "native-fs", not(target_family = "wasm")))]
 pub fn read_machine_info(path: impl AsRef<Path>) -> Result<MachineInfo, Error> {
     let path = path.as_ref();
     let source = open_native_source(path)?;
-    let inventory = native_inventory(path, &source)?;
+    let inventory = native_identity_inventory(path, &source)?;
     if !is_resmed_inventory(&inventory) {
         return Err(Error::NotResmedCard(path.to_owned()));
     }
@@ -250,6 +281,38 @@ fn native_inventory(path: &Path, source: &DirectorySource) -> Result<SourceInven
     source.inventory().map_err(|source| Error::Import {
         path: path.to_owned(),
         source,
+    })
+}
+
+#[cfg(all(feature = "native-fs", not(target_family = "wasm")))]
+fn native_identity_inventory(
+    path: &Path,
+    source: &DirectorySource,
+) -> Result<SourceInventory, Error> {
+    let mut entries = Vec::new();
+    for (name, kind) in [
+        (DATALOG, SourceEntryKind::Directory),
+        (STR_EDF, SourceEntryKind::File),
+        (IDENT_JSON, SourceEntryKind::File),
+        (IDENT_TGT, SourceEntryKind::File),
+    ] {
+        let present = source
+            .has_direct_entry(name, kind)
+            .map_err(|source| Error::Import {
+                path: path.to_owned(),
+                source,
+            })?;
+        if present {
+            entries.push(SourceEntry {
+                relative_path: name.to_owned(),
+                kind,
+                size_bytes: 0,
+            });
+        }
+    }
+    Ok(SourceInventory {
+        entries,
+        total_file_bytes: 0,
     })
 }
 
@@ -425,6 +488,10 @@ fn read_identification(
 }
 
 fn parse_json_bytes(bytes: &[u8]) -> Result<MachineInfo, JsonIdentificationError> {
+    // Qt's JSON reader accepts the UTF-8 BOM emitted by some ResMed media.
+    // `serde_json` does not, so remove only that exact optional prefix before
+    // parsing to preserve the pinned loader's accepted input surface.
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     let document: Value = serde_json::from_slice(bytes).map_err(JsonIdentificationError::Json)?;
     let product = document
         .get("FlowGenerator")
@@ -435,11 +502,19 @@ fn parse_json_bytes(bytes: &[u8]) -> Result<MachineInfo, JsonIdentificationError
             "FlowGenerator.IdentificationProfiles.Product",
         ))?;
 
+    // OSCAR's `scanProductObject` copies these three strings directly. Preserve
+    // them verbatim in the corresponding DTO fields. OSCAR derives `series`
+    // with `model.left(model.indexOf("11") + 2)`, which truncates product names
+    // without `11` and omits the display space in names such as `AirSense11`.
+    // OPAP intentionally corrects only that derived family value. If no product
+    // name exists, OPAP keeps the family empty rather than inheriting OSCAR's
+    // `newInfo()` default of `S9`.
     let mut info = MachineInfo::default();
     info.serial = json_string(product.get("SerialNumber"));
     info.model_number = json_string(product.get("ProductCode"));
-    info.model = json_string(product.get("ProductName"));
-    info.series = series_for_json_model(&info.model)
+    info.source_model = json_string(product.get("ProductName"));
+    info.model = info.source_model.clone();
+    info.series = series_for_product_name(&info.model)
         .unwrap_or_default()
         .to_owned();
     Ok(info)
@@ -454,16 +529,19 @@ fn parse_tgt_text(text: &str) -> MachineInfo {
 
     for raw_line in text.lines() {
         let line = raw_line.trim();
-        let Some((raw_key, raw_value)) = line.split_once(char::is_whitespace) else {
+        let Some((raw_key, raw_value)) = line.split_once(' ') else {
             continue;
         };
-        let key = raw_key.strip_prefix('#').unwrap_or(raw_key);
+        let Some(key) = raw_key.strip_prefix('#') else {
+            continue;
+        };
         let value = raw_value.trim();
 
         match key {
             "SRN" => info.serial = value.to_owned(),
             "PCD" => info.model_number = value.to_owned(),
             "PNA" => {
+                info.source_model = value.to_owned();
                 let (model, series) = normalize_tgt_model(value);
                 info.model = model;
                 info.series = series.to_owned();
@@ -476,42 +554,41 @@ fn parse_tgt_text(text: &str) -> MachineInfo {
 }
 
 fn normalize_tgt_model(value: &str) -> (String, &'static str) {
-    let mut model = value.replace('_', " ");
-    let lower = model.to_ascii_lowercase();
-    let series = if lower.contains("airsense 11") || lower.contains("airsense11") {
-        "AirSense 11"
-    } else if lower.contains("aircurve 11") || lower.contains("aircurve11") {
-        "AirCurve 11"
-    } else if lower.contains("airsense 10") {
-        "AirSense 10"
-    } else if lower.contains("sleepmate 10") {
-        "Sleepmate 10"
-    } else if lower.contains("aircurve 10") {
-        "AirCurve 10"
-    } else if lower.contains("lumis") {
-        "Lumis"
-    } else {
-        model = model.replace('(', " ").replace(')', "");
-        if !model.starts_with("S9") {
-            model = model.replace("S9", "");
-            model = format!("S9 {model}");
-        }
-        "S9"
-    };
+    // OSCAR replaces underscores and recognizes a small, case-sensitive set of
+    // families before assuming S9. OPAP intentionally makes family recognition
+    // case-insensitive, includes newer known families, and normalizes incidental
+    // whitespace. Serial and product-code values receive only the TGT line
+    // parser's outer-whitespace trimming; no family normalization touches them.
+    let mut model = value.replace(['_', '('], " ").replace(')', "");
+    model = model.split_whitespace().collect::<Vec<_>>().join(" ");
+    let series = series_for_product_name(&model).unwrap_or("S9");
+    if series == "S9" && !model.to_ascii_lowercase().starts_with("s9") {
+        model = format!("S9 {model}");
+    }
 
-    (model.trim().to_owned(), series)
+    (model, series)
 }
 
-fn series_for_json_model(model: &str) -> Option<&'static str> {
-    let lower = model.to_ascii_lowercase();
-    if lower.contains("airsense11") || lower.contains("airsense 11") {
+fn series_for_product_name(model: &str) -> Option<&'static str> {
+    let compact: String = model
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect();
+    if compact.contains("airsense11") {
         Some("AirSense 11")
-    } else if lower.contains("aircurve11") || lower.contains("aircurve 11") {
+    } else if compact.contains("aircurve11") {
         Some("AirCurve 11")
-    } else if lower.contains("airsense10") || lower.contains("airsense 10") {
+    } else if compact.contains("airsense10") {
         Some("AirSense 10")
-    } else if lower.contains("aircurve10") || lower.contains("aircurve 10") {
+    } else if compact.contains("sleepmate10") {
+        Some("Sleepmate 10")
+    } else if compact.contains("aircurve10") {
         Some("AirCurve 10")
+    } else if compact.contains("lumis") {
+        Some("Lumis")
+    } else if compact.starts_with("s9") {
+        Some("S9")
     } else {
         None
     }
@@ -609,13 +686,96 @@ mod tests {
     }
 
     #[test]
-    fn detection_matches_oscar_required_entries() {
+    fn bounded_detection_applies_pinned_oscar_code_required_entries() {
         let directory = TempDir::new().expect("temporary directory");
         assert!(!detect_card(directory.path()));
         fs::create_dir(directory.path().join(DATALOG)).expect("DATALOG directory");
         assert!(!detect_card(directory.path()));
+        fs::write(directory.path().join("STR.edf.gz"), []).expect("compressed STR");
+        assert!(
+            !detect_card(directory.path()),
+            "OSCAR Detect requires literal uncompressed STR.edf even though Open can accept gzip"
+        );
         fs::write(directory.path().join(STR_EDF), []).expect("STR.edf");
         assert!(detect_card(directory.path()));
+        assert!(
+            !detect_card(directory.path().join(DATALOG)),
+            "OSCAR Detect does not perform Open's DATALOG-to-root normalization"
+        );
+    }
+
+    #[test]
+    fn detection_does_not_traverse_unrelated_deep_card_contents() {
+        let directory = card();
+        fs::write(
+            directory.path().join(IDENT_TGT),
+            b"#SRN shallow-identity\n#PNA AirSense_10\n#PCD 37000\n",
+        )
+        .expect("identification");
+        let mut unrelated = directory.path().join("unrelated");
+        for index in 0..=crate::HARD_MAX_INVENTORY_DEPTH {
+            unrelated.push(format!("level-{index}"));
+        }
+        fs::create_dir_all(unrelated).expect("deep unrelated tree");
+
+        assert!(detect_card(directory.path()));
+        assert_eq!(
+            read_machine_info(directory.path())
+                .expect("shallow identity read")
+                .serial,
+            "shallow-identity"
+        );
+        assert!(
+            DirectorySource::open(directory.path())
+                .expect("directory source")
+                .inventory()
+                .is_err(),
+            "the full importer inventory still enforces its recursion budget"
+        );
+    }
+
+    #[test]
+    fn detection_is_not_oscar_open_import_readiness() {
+        let directory = card();
+        fs::write(directory.path().join(STR_EDF), b"not an EDF").expect("corrupt STR fixture");
+
+        assert!(detect_card(directory.path()));
+        let discovery = ResmedImporter
+            .discover(&DirectorySource::open(directory.path()).expect("directory source"))
+            .expect("signature discovery")
+            .expect("ResMed signature");
+        assert!(discovery.device.machine.serial.is_empty());
+        assert_eq!(discovery.warnings[0].code, "missing_identification");
+    }
+
+    #[test]
+    fn discovery_does_not_attempt_oscars_verified_str_summary_path() {
+        let directory = card();
+        fs::write(directory.path().join(STR_EDF), b"not an EDF").expect("corrupt STR fixture");
+        fs::write(
+            directory.path().join(IDENT_TGT),
+            b"#SRN identity-only-serial\n#PNA AirSense_10\n#PCD 37000\n",
+        )
+        .expect("identification");
+
+        let discovery = ResmedImporter
+            .discover(&DirectorySource::open(directory.path()).expect("directory source"))
+            .expect("signature discovery")
+            .expect("ResMed signature");
+        assert_eq!(discovery.device.machine.serial, "identity-only-serial");
+        assert!(discovery.warnings.is_empty());
+    }
+
+    #[test]
+    fn discovery_does_not_yet_reject_an_empty_identification_serial() {
+        let source = memory_card(Some((IDENT_TGT, b"#PNA AirSense_10_AutoSet\n#PCD 37028\n")));
+
+        let discovery = ResmedImporter
+            .discover(&source)
+            .expect("signature discovery")
+            .expect("ResMed signature");
+        assert!(discovery.device.machine.serial.is_empty());
+        assert!(discovery.warnings.is_empty());
     }
 
     #[test]
@@ -632,6 +792,7 @@ mod tests {
             MachineInfo {
                 brand: "ResMed".to_owned(),
                 model: "AirSense 10 AutoSet".to_owned(),
+                source_model: "AirSense_10_AutoSet".to_owned(),
                 model_number: "37028".to_owned(),
                 serial: "23123456789".to_owned(),
                 series: "AirSense 10".to_owned(),
@@ -640,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_series_nine_names_like_oscar() {
+    fn opap_correction_normalizes_legacy_s9_name() {
         let directory = card();
         fs::write(
             directory.path().join(IDENT_TGT),
@@ -650,22 +811,23 @@ mod tests {
 
         let info = read_machine_info(directory.path()).expect("machine info");
         assert_eq!(info.series, "S9");
-        assert_eq!(info.model, "S9  VPAP Adapt");
+        assert_eq!(info.model, "S9 VPAP Adapt");
+        assert_eq!(info.source_model, "(VPAP_Adapt)");
     }
 
     #[test]
-    fn preserves_oscar_series_nine_whitespace_quirk() {
+    fn opap_correction_collapses_legacy_tgt_model_whitespace() {
         let (plain, plain_series) = normalize_tgt_model("VPAP_Adapt");
         let (parenthesized, parenthesized_series) = normalize_tgt_model("(VPAP_Adapt)");
 
         assert_eq!(plain_series, "S9");
         assert_eq!(parenthesized_series, "S9");
         assert_eq!(plain, "S9 VPAP Adapt");
-        assert_eq!(parenthesized, "S9  VPAP Adapt");
+        assert_eq!(parenthesized, "S9 VPAP Adapt");
     }
 
     #[test]
-    fn json_identification_takes_precedence_over_tgt() {
+    fn json_file_precedence_matches_pinned_oscar_code() {
         let directory = card();
         fs::write(
             directory.path().join(IDENT_TGT),
@@ -690,8 +852,162 @@ mod tests {
 
         let info = read_machine_info(directory.path()).expect("machine info");
         assert_eq!(info.serial, "new");
-        assert_eq!(info.series, "AirSense 11");
         assert_eq!(info.model_number, "39001");
+        assert_eq!(info.model, "AirSense11 AutoSet");
+        assert_eq!(info.source_model, "AirSense11 AutoSet");
+    }
+
+    #[test]
+    fn opap_correction_normalizes_json_family_without_mutating_product_name() {
+        let source = memory_card(Some((
+            IDENT_JSON,
+            br#"{
+              "FlowGenerator": {
+                "IdentificationProfiles": {
+                  "Product": {
+                    "SerialNumber": "new",
+                    "ProductCode": "39001",
+                    "ProductName": "AirSense11 AutoSet"
+                  }
+                }
+              }
+            }"#,
+        )));
+
+        let machine = ResmedImporter
+            .discover(&source)
+            .expect("discovery")
+            .expect("ResMed signature")
+            .device
+            .machine;
+        assert_eq!(machine.model, "AirSense11 AutoSet");
+        assert_eq!(machine.source_model, "AirSense11 AutoSet");
+        assert_eq!(machine.series, "AirSense 11");
+    }
+
+    #[test]
+    fn json_raw_identity_fields_match_pinned_scan_product_object() {
+        let source = memory_card(Some((
+            IDENT_JSON,
+            br#"{
+              "FlowGenerator": {
+                "IdentificationProfiles": {
+                  "Product": {
+                    "SerialNumber": "  Raw Serial  ",
+                    "ProductCode": " 039001-X ",
+                    "ProductName": "Prototype family 11  "
+                  }
+                }
+              }
+            }"#,
+        )));
+
+        let discovery = ResmedImporter
+            .discover(&source)
+            .expect("discovery")
+            .expect("ResMed signature");
+        let machine = discovery.device.machine;
+        assert_eq!(machine.serial, "  Raw Serial  ");
+        assert_eq!(machine.model_number, " 039001-X ");
+        assert_eq!(machine.model, "Prototype family 11  ");
+        assert_eq!(machine.source_model, "Prototype family 11  ");
+    }
+
+    #[test]
+    fn json_utf8_bom_is_accepted_like_qjsondocument() {
+        let source = memory_card(Some((
+            IDENT_JSON,
+            b"\xEF\xBB\xBF{\"FlowGenerator\":{\"IdentificationProfiles\":{\"Product\":{\"SerialNumber\":\"bom-serial\",\"ProductCode\":\"39001\",\"ProductName\":\"AirSense11 AutoSet\"}}}}",
+        )));
+
+        let machine = ResmedImporter
+            .discover(&source)
+            .expect("discovery")
+            .expect("ResMed signature")
+            .device
+            .machine;
+        assert_eq!(machine.serial, "bom-serial");
+        assert_eq!(machine.model_number, "39001");
+        assert_eq!(machine.source_model, "AirSense11 AutoSet");
+        assert_eq!(machine.series, "AirSense 11");
+    }
+
+    #[test]
+    fn opap_correction_recognizes_case_insensitive_tgt_family() {
+        let source = memory_card(Some((
+            IDENT_TGT,
+            b"#SRN raw-serial\n#PNA airsense_10_autoset\n#PCD raw-code\n",
+        )));
+
+        let discovery = ResmedImporter
+            .discover(&source)
+            .expect("discovery")
+            .expect("ResMed signature");
+        let machine = discovery.device.machine;
+        assert_eq!(machine.serial, "raw-serial");
+        assert_eq!(machine.model_number, "raw-code");
+        assert_eq!(machine.model, "airsense 10 autoset");
+        assert_eq!(machine.source_model, "airsense_10_autoset");
+        assert_eq!(machine.series, "AirSense 10");
+    }
+
+    #[test]
+    fn opap_correction_does_not_invent_s9_when_product_name_is_absent() {
+        let tgt = ResmedImporter
+            .discover(&memory_card(Some((
+                IDENT_TGT,
+                b"#SRN serial-without-name\n#PCD code-without-name\n",
+            ))))
+            .expect("TGT discovery")
+            .expect("ResMed signature")
+            .device
+            .machine;
+        assert_eq!(tgt.serial, "serial-without-name");
+        assert_eq!(tgt.model_number, "code-without-name");
+        assert!(tgt.model.is_empty());
+        assert!(tgt.source_model.is_empty());
+        assert!(tgt.series.is_empty());
+
+        let json = ResmedImporter
+            .discover(&memory_card(Some((
+                IDENT_JSON,
+                br#"{
+                  "FlowGenerator": {
+                    "IdentificationProfiles": {
+                      "Product": {
+                        "SerialNumber": "json-serial",
+                        "ProductCode": "json-code"
+                      }
+                    }
+                  }
+                }"#,
+            ))))
+            .expect("JSON discovery")
+            .expect("ResMed signature")
+            .device
+            .machine;
+        assert_eq!(json.serial, "json-serial");
+        assert_eq!(json.model_number, "json-code");
+        assert!(json.model.is_empty());
+        assert!(json.source_model.is_empty());
+        assert!(json.series.is_empty());
+    }
+
+    #[test]
+    fn accepts_well_formed_tgt_keys_and_rejects_hardened_variants() {
+        let source = memory_card(Some((
+            IDENT_TGT,
+            b"SRN unprefixed\n#SRN\ttab-separated\n#SRN accepted\n#SRN\njunk#SRN malformed\nPCD ignored\n#PCD 37028\n",
+        )));
+
+        let machine = ResmedImporter
+            .discover(&source)
+            .expect("discovery")
+            .expect("ResMed signature")
+            .device
+            .machine;
+        assert_eq!(machine.serial, "accepted");
+        assert_eq!(machine.model_number, "37028");
     }
 
     #[test]

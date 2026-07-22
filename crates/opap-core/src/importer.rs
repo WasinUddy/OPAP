@@ -3,12 +3,12 @@
 // Copyright (C) 2026 OPAP contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// Ported and modified from OSCAR-SQL concepts:
-// https://gitlab.com/CrimsonNape/OSCAR-SQL
-// Upstream commit: 3741e5b423e4b5796c51a9d447e83b2525963d50
+// Ported and modified from OSCAR concepts:
+// https://gitlab.com/CrimsonNape/OSCAR-code
+// Upstream commit: 64c5e90a26f91fb15868bcfcccde0c1e1522ac86
 // Relevant upstream files: oscar/SleepLib/importcontext.h,
 // oscar/SleepLib/machine_loader.h
-// Modified: 2026-07-22
+// Modified: 2026-07-23
 
 //! Filesystem-independent importer interfaces.
 //!
@@ -384,6 +384,40 @@ impl DirectorySource {
     #[must_use]
     pub const fn limits(&self) -> InventoryLimits {
         self.limits
+    }
+
+    /// Checks one literal root child without traversing unrelated source data.
+    pub(crate) fn has_direct_entry(
+        &self,
+        name: &str,
+        expected_kind: SourceEntryKind,
+    ) -> Result<bool, ImportError> {
+        let path = safe_relative_path(name)?;
+        if path.components().count() != 1 {
+            return Err(ImportError::new(
+                ImportErrorKind::InvalidPath,
+                "direct entry name must contain exactly one path component",
+            )
+            .at_path(name));
+        }
+        let children = self
+            .directory
+            .entries()
+            .map_err(|source| self.io_error(source, None))?;
+        for child in children {
+            let child = child.map_err(|source| self.io_error(source, None))?;
+            if child.file_name() != path.as_os_str() {
+                continue;
+            }
+            let file_type = child
+                .file_type()
+                .map_err(|source| self.io_error(source, Some(name)))?;
+            return Ok(match expected_kind {
+                SourceEntryKind::File => file_type.is_file(),
+                SourceEntryKind::Directory => file_type.is_dir(),
+            });
+        }
+        Ok(false)
     }
 
     fn io_error(&self, source: io::Error, relative_path: Option<&str>) -> ImportError {
