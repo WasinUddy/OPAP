@@ -4,6 +4,7 @@ members = [
     "crates/opap-channels",
     "crates/opap-core",
     "crates/opap-edf",
+    "crates/opap-service",
     "crates/opap-storage",
 ]
 resolver = "3"

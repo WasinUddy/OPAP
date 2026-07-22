@@ -1,0 +1,20 @@
+[package]
+name = "opap-service"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-only"
+description = "Framework-neutral application service boundary for OPAP"
+repository = "https://github.com/WasinUddy/OPAP"
+readme = "README.md"
+
+[dependencies]
+opap-core = { version = "0.1.0", path = "../opap-core" }
+opap-storage = { version = "0.1.0", path = "../opap-storage" }
+rusqlite = { version = "0.37", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+uuid = { version = "1.18", features = ["v4"] }
+
+[dev-dependencies]
+serde_json = "1.0"
+tempfile = "3.20"
