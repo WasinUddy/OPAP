@@ -696,9 +696,14 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
+ "opap-edf",
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "opap-edf"
+version = "0.1.0"
 
 [[package]]
 name = "peg"
