@@ -1,0 +1,8 @@
+/target/
+/.idea/
+/.vscode/
+.DS_Store
+
+# CPAP exports can contain sensitive health information. Test cards stay local.
+/testdata/private/
+

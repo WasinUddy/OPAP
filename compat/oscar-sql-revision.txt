@@ -1,0 +1,8 @@
+Repository: https://gitlab.com/CrimsonNape/OSCAR-SQL
+Revision: 3741e5b423e4b5796c51a9d447e83b2525963d50
+Reference tests:
+  oscar/tests/resmedtests.cpp
+  oscar/tests/sessiontests.cpp
+Reference implementation:
+  oscar/SleepLib/loader_plugins/resmed_loader.cpp
+
