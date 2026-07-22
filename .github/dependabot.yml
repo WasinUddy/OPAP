@@ -1,0 +1,62 @@
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Bangkok
+    open-pull-requests-limit: 5
+    rebase-strategy: auto
+    commit-message:
+      prefix: deps(rust)
+    groups:
+      cargo-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /apps/desktop
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:10"
+      timezone: Asia/Bangkok
+    open-pull-requests-limit: 5
+    rebase-strategy: auto
+    commit-message:
+      prefix: deps(frontend)
+    groups:
+      frontend-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: cargo
+    directory: /tests/acceptance
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:06"
+      timezone: Asia/Bangkok
+    open-pull-requests-limit: 3
+    rebase-strategy: auto
+    commit-message:
+      prefix: deps(acceptance)
+    groups:
+      acceptance-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:20"
+      timezone: Asia/Bangkok
+    open-pull-requests-limit: 5
+    rebase-strategy: auto
+    commit-message:
+      prefix: deps(actions)
+    groups:
+      actions-minor-and-patch:
+        update-types: [minor, patch]

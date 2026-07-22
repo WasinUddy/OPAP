@@ -1,0 +1,268 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-format:
+    name: Rust formatting
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  rust-clippy:
+    name: Rust linting
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: clippy
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          shared-key: clippy
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  rust-test:
+    name: Rust unit and integration tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          shared-key: tests
+
+      - name: Run workspace tests
+        run: cargo test --workspace --all-targets --all-features --locked
+
+  rust-wasm:
+    name: Portable core WASM checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          shared-key: wasm
+
+      - name: Check portable crates without native features
+        run: |
+          cargo check -p opap-core --lib --target wasm32-unknown-unknown --no-default-features --locked
+          cargo clippy -p opap-core --lib --target wasm32-unknown-unknown --no-default-features --locked -- -D warnings
+          cargo check -p opap-edf --target wasm32-unknown-unknown --no-default-features --locked
+          cargo clippy -p opap-edf --target wasm32-unknown-unknown --no-default-features --locked -- -D warnings
+
+  cucumber:
+    name: Cucumber acceptance tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Detect acceptance suite
+        id: acceptance
+        shell: bash
+        run: |
+          if [[ -f tests/acceptance/Cargo.toml ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No tests/acceptance/Cargo.toml yet; acceptance job is a no-op."
+          fi
+
+      - name: Install Rust toolchain
+        if: steps.acceptance.outputs.present == 'true'
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Restore Rust cache
+        if: steps.acceptance.outputs.present == 'true'
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          shared-key: cucumber
+          workspaces: tests/acceptance -> target
+
+      - name: Run Cucumber scenarios
+        if: steps.acceptance.outputs.present == 'true'
+        shell: bash
+        run: |
+          cargo fmt --manifest-path tests/acceptance/Cargo.toml -- --check
+          cargo clippy --manifest-path tests/acceptance/Cargo.toml --all-targets --locked -- -D warnings
+          cargo test --manifest-path tests/acceptance/Cargo.toml --locked
+
+  frontend:
+    name: Frontend lint, typecheck, unit tests, and build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Detect frontend package manager
+        id: frontend
+        shell: bash
+        run: |
+          if [[ ! -f apps/desktop/package.json ]]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No apps/desktop package yet; frontend job is a no-op."
+            exit 0
+          fi
+
+          echo "present=true" >> "$GITHUB_OUTPUT"
+          if [[ -f apps/desktop/pnpm-lock.yaml ]]; then
+            echo "manager=pnpm" >> "$GITHUB_OUTPUT"
+            echo "lockfile=apps/desktop/pnpm-lock.yaml" >> "$GITHUB_OUTPUT"
+          elif [[ -f apps/desktop/package-lock.json ]]; then
+            echo "manager=npm" >> "$GITHUB_OUTPUT"
+            echo "lockfile=apps/desktop/package-lock.json" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::apps/desktop must commit pnpm-lock.yaml or package-lock.json"
+            exit 1
+          fi
+
+      - name: Install pnpm
+        if: steps.frontend.outputs.manager == 'pnpm'
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        with:
+          package_json_file: apps/desktop/package.json
+          run_install: false
+
+      - name: Install Node.js
+        if: steps.frontend.outputs.present == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.17.1
+          cache: ${{ steps.frontend.outputs.manager }}
+          cache-dependency-path: ${{ steps.frontend.outputs.lockfile }}
+
+      - name: Install frontend dependencies
+        if: steps.frontend.outputs.present == 'true'
+        shell: bash
+        run: |
+          if [[ "${{ steps.frontend.outputs.manager }}" == "pnpm" ]]; then
+            pnpm --dir apps/desktop install --frozen-lockfile
+          else
+            npm --prefix apps/desktop ci
+          fi
+
+      - name: Lint frontend
+        if: steps.frontend.outputs.present == 'true'
+        working-directory: apps/desktop
+        run: ${{ steps.frontend.outputs.manager }} run lint
+
+      - name: Typecheck frontend
+        if: steps.frontend.outputs.present == 'true'
+        working-directory: apps/desktop
+        run: ${{ steps.frontend.outputs.manager }} run typecheck
+
+      - name: Run frontend unit tests
+        if: steps.frontend.outputs.present == 'true'
+        working-directory: apps/desktop
+        run: ${{ steps.frontend.outputs.manager }} run test:unit
+
+      - name: Build frontend
+        if: steps.frontend.outputs.present == 'true'
+        working-directory: apps/desktop
+        env:
+          VITE_OPAP_SOURCE_REVISION: ${{ github.sha }}
+        run: ${{ steps.frontend.outputs.manager }} run build
+
+      - name: Upload frontend build
+        if: steps.frontend.outputs.present == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: opap-frontend-${{ github.sha }}
+          path: apps/desktop/dist
+          if-no-files-found: error
+          retention-days: 14
+
+  rust-build:
+    name: Build Rust release artifact
+    needs: [rust-format, rust-clippy, rust-test, rust-wasm, cucumber]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          shared-key: release
+
+      - name: Build release binaries
+        run: cargo build --workspace --all-features --release --locked
+
+      - name: Upload Rust binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: opap-core-linux-x86_64-${{ github.sha }}
+          path: target/release/opap-core
+          if-no-files-found: error
+          retention-days: 14
