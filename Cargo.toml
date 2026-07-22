@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/opap-core", "crates/opap-edf", "crates/opap-storage"]
+members = [
+    "crates/opap-analytics",
+    "crates/opap-core",
+    "crates/opap-edf",
+    "crates/opap-storage",
+]
 resolver = "3"
 
 [workspace.package]
