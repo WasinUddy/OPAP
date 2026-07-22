@@ -6,8 +6,8 @@
 //!
 //! The calculations are descriptive transformations of device-provided data.
 //! They do not diagnose, score treatment effectiveness, or provide medical
-//! advice. See `OSCAR_PROVENANCE.md` in this crate for the pinned OSCAR source
-//! references and the known compatibility boundaries.
+//! advice. See `OSCAR_PROVENANCE.md` in this crate for exact pinned OSCAR source
+//! references, deliberate behavioral differences, and the non-parity scope.
 
 #![forbid(unsafe_code)]
 

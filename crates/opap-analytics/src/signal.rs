@@ -6,9 +6,11 @@ use crate::{AnalyticsError, u64_as_f64};
 ///
 /// For a regularly sampled signal, every sample must use the same period. For
 /// step/event data, use the time until the next value. Integer millisecond
-/// weights match OSCAR's waveform time-summary convention at the pinned
-/// revision for waveform channels; converting samples to repeated values is
-/// neither required nor recommended.
+/// weights can represent OSCAR's pinned single-waveform-list `count * rate`
+/// convention when an importer supplies the same timing. Across multiple
+/// waveform lists, the pinned source re-adds all cumulative value counts using
+/// each current list's rate. OPAP deliberately makes duration explicit and
+/// does not reproduce that behavior or OSCAR's event-time truncation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WeightedSample {
     pub value: f64,
@@ -46,7 +48,7 @@ pub struct LeakPressureSummary {
     pub pressure_cmh2o: Option<SignalSummary>,
 }
 
-/// Summarize a signal using time-weighted OSCAR-compatible percentile ranks.
+/// Summarize a signal using guarded, time-weighted day-style percentile ranks.
 ///
 /// # Errors
 ///
@@ -111,13 +113,14 @@ pub fn summarize_regular_signal(
 
 /// Calculate one weighted percentile in the inclusive range `0.0..=1.0`.
 ///
-/// This is a guarded port of OSCAR's time-weighted rank algorithm. At an exact
-/// cumulative-weight boundary it interpolates between adjacent value-bin
-/// midpoints. The pinned C++ can extrapolate past the observed maximum at the
-/// upper tail and can address one element past the final bin; OPAP clamps the
-/// interpolation factor to preserve the invariant `min <= result <= max`.
-/// Consequently, parity at that malformed upper-tail boundary is intentionally
-/// not claimed. Other compatibility conditions are in `OSCAR_PROVENANCE.md`.
+/// This is derived from OSCAR's pinned `Day::percentile` time-weighted rank
+/// walk. At an exact cumulative-weight boundary it interpolates between
+/// adjacent value-bin midpoints. The pinned C++ can extrapolate beyond the next
+/// observed bin and can address one element past the final bin; OPAP returns
+/// the final value when there is no successor and clamps the interpolation to
+/// preserve `min <= result <= max`. It also rejects invalid inputs. This is not
+/// OSCAR `Session::percentile`, which is an unweighted `nth_element` operation,
+/// and no parity is claimed. See `OSCAR_PROVENANCE.md` for exact source links.
 ///
 /// # Errors
 ///

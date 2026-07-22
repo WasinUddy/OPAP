@@ -36,8 +36,10 @@ impl CivilDate {
 
 /// The named therapy day as days since 1970-01-01.
 ///
-/// For the default OSCAR/ResMed split, this day begins at local noon on the
-/// named civil date and ends immediately before local noon the next date.
+/// This fixed-noon contract corresponds to OSCAR's pinned default/forced `ResMed`
+/// split. It does not model OSCAR's configurable split or combining policies.
+/// The day begins at local noon on the named civil date and ends immediately
+/// before local noon the next date.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TherapyDay {
     days_since_unix_epoch: i64,

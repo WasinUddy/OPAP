@@ -38,8 +38,9 @@ impl TherapySlice {
 /// One session window and its optional mask-on/mask-off slices.
 ///
 /// With no slices, the complete session window represents therapy. When one or
-/// more slices exist, only `MaskOn` slices contribute. This mirrors OSCAR's
-/// `Session::hours()` behavior at the pinned reference revision.
+/// more slices exist, only `MaskOn` slices contribute. This is the selection
+/// rule used by OSCAR's pinned `Session::hours()` source; it is not a parity
+/// claim because OPAP adds interval validation and checked arithmetic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionUsageInput {
     pub start_ms: i64,
@@ -90,9 +91,10 @@ pub fn summarize_session_usage(
 
 /// Union active therapy across sessions so overlapping time is counted once.
 ///
-/// OSCAR performs an equivalent interval union for a day's enabled sessions;
-/// see `OSCAR_PROVENANCE.md`. Adjacent half-open intervals are merged as an
-/// implementation detail but retain the same duration.
+/// OSCAR's pinned `Day::total_time(MT_CPAP)` source unions enabled CPAP ranges.
+/// This lower-level function has no enabled or machine-type field, so callers
+/// must perform that selection before invoking it. Adjacent half-open intervals
+/// are merged as an implementation detail but retain the same duration.
 ///
 /// # Errors
 ///

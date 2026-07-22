@@ -65,10 +65,23 @@ assert_eq!(pressure.median, 8.5);
 # Ok::<(), opap_analytics::AnalyticsError>(())
 ```
 
-## Compatibility scope
+## Source provenance, not a parity claim
 
-[`OSCAR_PROVENANCE.md`](OSCAR_PROVENANCE.md) pins every borrowed behavioral
-reference to an exact OSCAR-SQL commit and calls out intentional guards and
-unknowns. In particular, high-tail percentile behavior is bounded rather than
-copying an unsafe C++ edge case, and optional OSCAR preferences for combining
-nearby sessions are outside this crate.
+[`OSCAR_PROVENANCE.md`](OSCAR_PROVENANCE.md) pins every source-derived formula
+to `CrimsonNape/OSCAR-code` commit
+`64c5e90a26f91fb15868bcfcccde0c1e1522ac86` and documents the exact behavior
+differences. The examples in `tests/source_derived_examples.rs` are
+hand-worked source examples, not differential-oracle or compatibility tests.
+
+In particular, OPAP bounds percentiles instead of copying OSCAR's upper-tail
+extrapolation/out-of-range behavior; rejects zero-time, overflow, and malformed
+overlapping inputs; combines signal means by represented sample duration rather
+than complete session duration; and implements only a fixed noon split with an
+explicit time/offset contract. It does not implement OSCAR's unweighted session
+percentile or its optional session-combining policies. No end-to-end parity is
+claimed.
+
+Before real ResMed sessions use `aggregate_by_noon`, integration must carry the
+core candidate's authoritative `resmed_day` through aggregation. Recomputing a
+day from a header-selected timestamp can move a drifted near-noon file to the
+wrong day; see the integration gate in the provenance document.

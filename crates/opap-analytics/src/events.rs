@@ -87,9 +87,10 @@ pub struct EventIndices {
 
 /// Calculate event counts per therapy hour, including AHI and RDI.
 ///
-/// This uses the same formula as OSCAR's `Day::calcAHI()` and
-/// `Day::calcRDI()` when `therapy_ms` and channel counts are the same. It does
-/// not attach a clinical interpretation to the resulting numbers.
+/// This uses the formula derived from OSCAR's pinned `Day::calcAHI()` and
+/// `Day::calcRDI()` source when positive `therapy_ms` and channel counts are
+/// identical. It adds zero-time and overflow guards and does not claim
+/// end-to-end parity or attach a clinical interpretation to the numbers.
 ///
 /// # Errors
 ///
