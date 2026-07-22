@@ -55,9 +55,11 @@ jobs:
       - name: Audit Rust dependencies
         uses: EmbarkStudios/cargo-deny-action@6c8f9facfa5047ec02d8485b6bf52b587b7777d1 # v2.0.18
         with:
-          rust-version: "1.85.0"
+          rust-version: stable
           manifest-path: ${{ matrix.manifest }}
-          arguments: --all-features --config .github/deny.toml
+          arguments: --all-features
+          command: check
+          command-arguments: --config .github/deny.toml
 
   frontend-dependencies:
     name: Frontend advisories and licenses
