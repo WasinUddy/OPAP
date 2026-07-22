@@ -93,6 +93,64 @@ impl SourceInventory {
     }
 }
 
+/// Absolute recursion ceiling accepted by [`InventoryLimits`].
+///
+/// Callers may configure a lower limit, but never a higher one. This keeps the
+/// recursive capability traversal stack bounded even for hostile directory
+/// trees.
+pub const HARD_MAX_INVENTORY_DEPTH: u16 = 64;
+
+/// Budgets applied while a native source inventory is being constructed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InventoryLimits {
+    /// Maximum number of relative-path components below the source root.
+    pub max_depth: u16,
+    /// Maximum combined count of files and directories.
+    pub max_entries: u64,
+    /// Maximum UTF-8 byte length of any normalized relative path.
+    pub max_relative_path_bytes: u64,
+    /// Maximum checked sum of regular-file sizes.
+    pub max_total_file_bytes: u64,
+}
+
+impl Default for InventoryLimits {
+    fn default() -> Self {
+        Self {
+            max_depth: 16,
+            max_entries: 100_000,
+            max_relative_path_bytes: 4_096,
+            max_total_file_bytes: 1 << 40,
+        }
+    }
+}
+
+/// Inventory resource whose configured budget was exceeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryLimitResource {
+    /// Relative directory depth.
+    Depth,
+    /// Combined file and directory entry count.
+    EntryCount,
+    /// UTF-8 bytes in one normalized relative path.
+    RelativePathBytes,
+    /// Checked aggregate size of all regular files.
+    AggregateFileBytes,
+}
+
+/// Structured details for an inventory-budget failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InventoryLimitViolation {
+    /// Resource that exceeded its budget.
+    pub resource: InventoryLimitResource,
+    /// Configured maximum.
+    pub maximum: u64,
+    /// First observed value beyond the maximum, or `None` on arithmetic
+    /// overflow.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed: Option<u64>,
+}
+
 /// Portable error category exposed across the importer boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -107,6 +165,10 @@ pub enum ImportErrorKind {
     InvalidData,
     /// A source file exceeded the maximum size allowed for that read.
     SizeLimitExceeded,
+    /// Native inventory construction exceeded a configured resource budget.
+    InventoryLimitExceeded,
+    /// A caller supplied an unsafe or internally inconsistent configuration.
+    InvalidConfiguration,
     /// The requested import operation has not been implemented.
     UnsupportedOperation,
 }
@@ -121,6 +183,9 @@ pub struct ImportError {
     /// Source-relative path associated with the failure.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relative_path: Option<String>,
+    /// Structured budget details for [`ImportErrorKind::InventoryLimitExceeded`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory_limit: Option<InventoryLimitViolation>,
 }
 
 impl ImportError {
@@ -131,6 +196,32 @@ impl ImportError {
             kind,
             message: message.into(),
             relative_path: None,
+            inventory_limit: None,
+        }
+    }
+
+    /// Creates a structured inventory-limit error.
+    #[must_use]
+    pub fn inventory_limit_exceeded(
+        resource: InventoryLimitResource,
+        maximum: u64,
+        observed: Option<u64>,
+    ) -> Self {
+        let observed_text = observed.map_or_else(
+            || "arithmetic overflow".to_owned(),
+            |value| value.to_string(),
+        );
+        Self {
+            kind: ImportErrorKind::InventoryLimitExceeded,
+            message: format!(
+                "inventory {resource:?} limit exceeded: maximum {maximum}, observed {observed_text}"
+            ),
+            relative_path: None,
+            inventory_limit: Some(InventoryLimitViolation {
+                resource,
+                maximum,
+                observed,
+            }),
         }
     }
 
@@ -228,16 +319,38 @@ pub trait Importer {
 pub struct DirectorySource {
     root: PathBuf,
     directory: Dir,
+    limits: InventoryLimits,
 }
 
 #[cfg(all(feature = "native-fs", not(target_family = "wasm")))]
 impl DirectorySource {
     /// Opens `path` once and captures it as a directory capability.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, ImportError> {
+        Self::open_with_limits(path, InventoryLimits::default())
+    }
+
+    /// Opens `path` with explicit inventory resource limits.
+    pub fn open_with_limits(
+        path: impl Into<PathBuf>,
+        limits: InventoryLimits,
+    ) -> Result<Self, ImportError> {
+        if limits.max_depth > HARD_MAX_INVENTORY_DEPTH {
+            return Err(ImportError::new(
+                ImportErrorKind::InvalidConfiguration,
+                format!(
+                    "inventory max_depth {} exceeds the hard ceiling {HARD_MAX_INVENTORY_DEPTH}",
+                    limits.max_depth
+                ),
+            ));
+        }
         let root = path.into();
         let directory = Dir::open_ambient_dir(&root, ambient_authority())
             .map_err(|source| root_io_error(&root, source, None))?;
-        Ok(Self { root, directory })
+        Ok(Self {
+            root,
+            directory,
+            limits,
+        })
     }
 
     /// Alias for [`Self::open`] retained for callers that used `new`.
@@ -249,6 +362,12 @@ impl DirectorySource {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Returns the inventory limits enforced by this source.
+    #[must_use]
+    pub const fn limits(&self) -> InventoryLimits {
+        self.limits
     }
 
     fn io_error(&self, source: io::Error, relative_path: Option<&str>) -> ImportError {
@@ -283,17 +402,13 @@ impl DirectorySource {
 impl ImportSource for DirectorySource {
     fn inventory(&self) -> Result<SourceInventory, ImportError> {
         let mut entries = Vec::new();
-        collect_entries(self, &self.directory, "", &mut entries)?;
+        let mut budget = InventoryBudget::default();
+        collect_entries(self, &self.directory, "", 0, &mut budget, &mut entries)?;
         entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-        let total_file_bytes = entries
-            .iter()
-            .filter(|entry| entry.kind == SourceEntryKind::File)
-            .map(|entry| entry.size_bytes)
-            .sum();
 
         Ok(SourceInventory {
             entries,
-            total_file_bytes,
+            total_file_bytes: budget.total_file_bytes,
         })
     }
 
@@ -341,10 +456,59 @@ impl ImportSource for DirectorySource {
 }
 
 #[cfg(all(feature = "native-fs", not(target_family = "wasm")))]
+#[derive(Debug, Default)]
+struct InventoryBudget {
+    entries: u64,
+    total_file_bytes: u64,
+}
+
+#[cfg(all(feature = "native-fs", not(target_family = "wasm")))]
+impl InventoryBudget {
+    fn add_entry(
+        &mut self,
+        limits: InventoryLimits,
+        relative_path: &str,
+    ) -> Result<(), ImportError> {
+        let observed = self.entries.checked_add(1);
+        if observed.is_none_or(|count| count > limits.max_entries) {
+            return Err(ImportError::inventory_limit_exceeded(
+                InventoryLimitResource::EntryCount,
+                limits.max_entries,
+                observed,
+            )
+            .at_path(relative_path));
+        }
+        self.entries = observed.expect("checked above");
+        Ok(())
+    }
+
+    fn add_file_bytes(
+        &mut self,
+        limits: InventoryLimits,
+        relative_path: &str,
+        file_bytes: u64,
+    ) -> Result<(), ImportError> {
+        let observed = self.total_file_bytes.checked_add(file_bytes);
+        if observed.is_none_or(|bytes| bytes > limits.max_total_file_bytes) {
+            return Err(ImportError::inventory_limit_exceeded(
+                InventoryLimitResource::AggregateFileBytes,
+                limits.max_total_file_bytes,
+                observed,
+            )
+            .at_path(relative_path));
+        }
+        self.total_file_bytes = observed.expect("checked above");
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "native-fs", not(target_family = "wasm")))]
 fn collect_entries(
     source: &DirectorySource,
     directory: &Dir,
     relative_directory: &str,
+    parent_depth: u16,
+    budget: &mut InventoryBudget,
     entries: &mut Vec<SourceEntry>,
 ) -> Result<(), ImportError> {
     let children = directory.entries().map_err(|error| {
@@ -378,6 +542,25 @@ fn collect_entries(
         } else {
             format!("{relative_directory}/{normalized_name}")
         };
+        let depth = parent_depth.checked_add(1);
+        if depth.is_none_or(|value| value > source.limits.max_depth) {
+            return Err(ImportError::inventory_limit_exceeded(
+                InventoryLimitResource::Depth,
+                u64::from(source.limits.max_depth),
+                depth.map(u64::from),
+            )
+            .at_path(&relative_path));
+        }
+        let relative_path_bytes = u64::try_from(relative_path.len()).ok();
+        if relative_path_bytes.is_none_or(|bytes| bytes > source.limits.max_relative_path_bytes) {
+            return Err(ImportError::inventory_limit_exceeded(
+                InventoryLimitResource::RelativePathBytes,
+                source.limits.max_relative_path_bytes,
+                relative_path_bytes,
+            )
+            .at_path(&relative_path));
+        }
+        budget.add_entry(source.limits, &relative_path)?;
 
         if file_type.is_dir() {
             let child_directory = directory
@@ -388,7 +571,14 @@ fn collect_entries(
                 kind: SourceEntryKind::Directory,
                 size_bytes: 0,
             });
-            collect_entries(source, &child_directory, &relative_path, entries)?;
+            collect_entries(
+                source,
+                &child_directory,
+                &relative_path,
+                depth.expect("checked above"),
+                budget,
+                entries,
+            )?;
         } else {
             let mut options = OpenOptions::new();
             options.read(true).follow(FollowSymlinks::No);
@@ -399,8 +589,13 @@ fn collect_entries(
                 .metadata()
                 .map_err(|error| source.io_error(error, Some(&relative_path)))?;
             if !metadata.is_file() {
-                continue;
+                return Err(ImportError::new(
+                    ImportErrorKind::Source,
+                    "source entry changed type during inventory",
+                )
+                .at_path(&relative_path));
             }
+            budget.add_file_bytes(source.limits, &relative_path, metadata.len())?;
             entries.push(SourceEntry {
                 relative_path,
                 kind: SourceEntryKind::File,
@@ -460,6 +655,30 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    fn assert_inventory_limit(
+        error: &ImportError,
+        resource: InventoryLimitResource,
+        maximum: u64,
+        observed: Option<u64>,
+    ) {
+        assert_eq!(error.kind, ImportErrorKind::InventoryLimitExceeded);
+        assert_eq!(
+            error.inventory_limit,
+            Some(InventoryLimitViolation {
+                resource,
+                maximum,
+                observed,
+            })
+        );
+
+        let json = serde_json::to_value(error).expect("serialize typed error");
+        assert_eq!(json["kind"], "inventory_limit_exceeded");
+        assert_eq!(
+            serde_json::from_value::<ImportError>(json).expect("deserialize typed error"),
+            error.clone()
+        );
+    }
 
     #[test]
     fn directory_source_lists_normalized_sorted_entries() {
@@ -537,5 +756,115 @@ mod tests {
         let inventory = source.inventory().expect("safe inventory");
         assert!(!inventory.has_file("file-link"));
         assert!(!inventory.has_directory("directory-link"));
+    }
+
+    #[test]
+    fn inventory_rejects_depth_beyond_configured_limit() {
+        let root = TempDir::new().expect("source directory");
+        fs::create_dir_all(root.path().join("one/two")).expect("deep tree");
+        let limits = InventoryLimits {
+            max_depth: 1,
+            ..InventoryLimits::default()
+        };
+        let source = DirectorySource::open_with_limits(root.path(), limits).expect("open source");
+
+        let error = source.inventory().expect_err("depth limit");
+
+        assert_inventory_limit(&error, InventoryLimitResource::Depth, 1, Some(2));
+    }
+
+    #[test]
+    fn inventory_rejects_more_than_configured_entry_count() {
+        let root = TempDir::new().expect("source directory");
+        fs::write(root.path().join("one"), []).expect("first file");
+        fs::write(root.path().join("two"), []).expect("second file");
+        let limits = InventoryLimits {
+            max_entries: 1,
+            ..InventoryLimits::default()
+        };
+        let source = DirectorySource::open_with_limits(root.path(), limits).expect("open source");
+
+        let error = source.inventory().expect_err("entry count limit");
+
+        assert_inventory_limit(&error, InventoryLimitResource::EntryCount, 1, Some(2));
+    }
+
+    #[test]
+    fn inventory_rejects_oversized_normalized_relative_path() {
+        let root = TempDir::new().expect("source directory");
+        fs::write(root.path().join("123456"), []).expect("long path file");
+        let limits = InventoryLimits {
+            max_relative_path_bytes: 5,
+            ..InventoryLimits::default()
+        };
+        let source = DirectorySource::open_with_limits(root.path(), limits).expect("open source");
+
+        let error = source.inventory().expect_err("path length limit");
+
+        assert_inventory_limit(
+            &error,
+            InventoryLimitResource::RelativePathBytes,
+            5,
+            Some(6),
+        );
+    }
+
+    #[test]
+    fn inventory_rejects_aggregate_file_bytes_beyond_limit() {
+        let root = TempDir::new().expect("source directory");
+        fs::write(root.path().join("one"), b"1234").expect("first file");
+        fs::write(root.path().join("two"), b"5678").expect("second file");
+        let limits = InventoryLimits {
+            max_total_file_bytes: 7,
+            ..InventoryLimits::default()
+        };
+        let source = DirectorySource::open_with_limits(root.path(), limits).expect("open source");
+
+        let error = source.inventory().expect_err("aggregate byte limit");
+
+        assert_inventory_limit(
+            &error,
+            InventoryLimitResource::AggregateFileBytes,
+            7,
+            Some(8),
+        );
+    }
+
+    #[test]
+    fn inventory_aggregate_uses_checked_arithmetic() {
+        let limits = InventoryLimits {
+            max_total_file_bytes: u64::MAX,
+            ..InventoryLimits::default()
+        };
+        let mut budget = InventoryBudget {
+            entries: 0,
+            total_file_bytes: u64::MAX - 1,
+        };
+
+        let error = budget
+            .add_file_bytes(limits, "overflow.edf", 2)
+            .expect_err("aggregate overflow");
+
+        assert_inventory_limit(
+            &error,
+            InventoryLimitResource::AggregateFileBytes,
+            u64::MAX,
+            None,
+        );
+    }
+
+    #[test]
+    fn inventory_rejects_depth_configuration_above_hard_ceiling() {
+        let root = TempDir::new().expect("source directory");
+        let limits = InventoryLimits {
+            max_depth: HARD_MAX_INVENTORY_DEPTH + 1,
+            ..InventoryLimits::default()
+        };
+
+        let error = DirectorySource::open_with_limits(root.path(), limits)
+            .expect_err("unsafe depth configuration");
+
+        assert_eq!(error.kind, ImportErrorKind::InvalidConfiguration);
+        assert!(error.inventory_limit.is_none());
     }
 }

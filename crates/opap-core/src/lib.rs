@@ -19,6 +19,7 @@ pub use domain::{
 #[cfg(all(feature = "native-fs", not(target_family = "wasm")))]
 pub use importer::DirectorySource;
 pub use importer::{
-    DeviceDiscovery, ImportError, ImportErrorKind, ImportOptions, ImportSource, Importer,
+    DeviceDiscovery, HARD_MAX_INVENTORY_DEPTH, ImportError, ImportErrorKind, ImportOptions,
+    ImportSource, Importer, InventoryLimitResource, InventoryLimitViolation, InventoryLimits,
     SourceEntry, SourceEntryKind, SourceInventory,
 };
