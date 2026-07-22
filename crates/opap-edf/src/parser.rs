@@ -681,7 +681,11 @@ fn parse_datetime(bytes: &[u8], offset: usize) -> Result<EdfDateTime, ParseError
     let parse_pair = |start: usize| -> Option<u8> {
         let tens = bytes.get(start)?.checked_sub(b'0')?;
         let ones = bytes.get(start + 1)?.checked_sub(b'0')?;
-        (tens <= 9 && ones <= 9).then_some(tens * 10 + ones)
+        if tens <= 9 && ones <= 9 {
+            tens.checked_mul(10)?.checked_add(ones)
+        } else {
+            None
+        }
     };
     let Some(day) = parse_pair(0) else {
         return Err(ParseError::new(
@@ -1185,6 +1189,26 @@ mod tests {
         assert_eq!(parsed.annotations.len(), 1);
         assert!((parsed.annotations[0].onset_seconds - 1.5).abs() < f64::EPSILON);
         assert_eq!(parsed.annotations[0].text, "Hypopnea");
+    }
+
+    #[test]
+    fn every_ascii_non_digit_in_a_datetime_pair_is_rejected_without_panicking() {
+        const DIGIT_POSITIONS: [usize; 12] = [0, 1, 3, 4, 6, 7, 8, 9, 11, 12, 14, 15];
+        let valid = *b"01.02.24\x2003.04.05";
+
+        for position in DIGIT_POSITIONS {
+            for byte in 0_u8..=127 {
+                if byte.is_ascii_digit() {
+                    continue;
+                }
+                let mut malformed = valid;
+                malformed[position] = byte;
+                assert!(
+                    parse_datetime(&malformed, 0).is_err(),
+                    "accepted byte {byte:#04x} at position {position}"
+                );
+            }
+        }
     }
 
     #[test]
