@@ -3,7 +3,17 @@ all-features = true
 
 [advisories]
 version = 2
-ignore = []
+ignore = [
+    # Tauri 2.11's urlpattern dependency still pulls open-i18n/rust-unic crates.
+    # These are unmaintained advisories with "No safe upgrade is available" in
+    # RustSec, not known vulnerabilities. Keep true vulnerability advisories out
+    # of this list.
+    "RUSTSEC-2025-0075", # unic-char-range
+    "RUSTSEC-2025-0080", # unic-common
+    "RUSTSEC-2025-0081", # unic-char-property
+    "RUSTSEC-2025-0098", # unic-ucd-version
+    "RUSTSEC-2025-0100", # unic-ucd-ident
+]
 
 [licenses]
 version = 2

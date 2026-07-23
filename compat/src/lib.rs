@@ -1072,14 +1072,14 @@ fn validate_time(issues: &mut Vec<ValidationIssue>, path: &str, time: &SessionTi
     ] {
         json_safe_signed(issues, &format!("{path}.{field}"), correction);
     }
-    if let (Some(start), Some(end)) = (start_utc, end_utc) {
-        if start >= end {
-            issue(
-                issues,
-                &format!("{path}.end_utc"),
-                "must be later than start_utc",
-            );
-        }
+    if let (Some(start), Some(end)) = (start_utc, end_utc)
+        && start >= end
+    {
+        issue(
+            issues,
+            &format!("{path}.end_utc"),
+            "must be later than start_utc",
+        );
     }
     for (field, utc, local, offset, correction) in [
         (
@@ -1509,14 +1509,14 @@ fn validate_waveform_encoding(
         &format!("{path}.physical_max_decimal"),
         &encoding.physical_max_decimal,
     );
-    if let (Some(min), Some(max)) = (physical_min, physical_max) {
-        if min >= max {
-            issue(
-                issues,
-                &format!("{path}.physical_min_decimal"),
-                "must represent a value less than physical_max_decimal",
-            );
-        }
+    if let (Some(min), Some(max)) = (physical_min, physical_max)
+        && min >= max
+    {
+        issue(
+            issues,
+            &format!("{path}.physical_min_decimal"),
+            "must represent a value less than physical_max_decimal",
+        );
     }
     if encoding.samples_per_record == 0 {
         issue(
@@ -1577,10 +1577,10 @@ fn canonical_plain_decimal(value: &str) -> bool {
     {
         return false;
     }
-    if let Some(fraction) = fraction {
-        if fraction.is_empty() || !ascii_digits(fraction.as_bytes()) || fraction.ends_with('0') {
-            return false;
-        }
+    if let Some(fraction) = fraction
+        && (fraction.is_empty() || !ascii_digits(fraction.as_bytes()) || fraction.ends_with('0'))
+    {
+        return false;
     }
     if negative
         && whole == "0"
@@ -1825,7 +1825,7 @@ fn decimal(bytes: &[u8]) -> u32 {
 }
 
 fn is_leap_year(year: u32) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
 }
 
 fn days_from_civil(mut year: i64, month: i64, day: i64) -> i64 {
