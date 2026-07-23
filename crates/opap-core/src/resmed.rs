@@ -1,5 +1,5 @@
 // Copyright (C) 2011-2018 Mark Watkins
-// Copyright (C) 2019-2026 The OSCAR Team
+// Copyright (C) 2019-2025 The OSCAR Team
 // Copyright (C) 2026 OPAP contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
@@ -34,8 +34,9 @@
 //! parsed identification with a non-empty serial, and attempts to use only STR
 //! summary data that parses and matches that serial. A bad STR can be omitted
 //! while OSCAR continues with DATALOG detail files, so STR verification is not
-//! itself an unconditional `Open` rejection gate. OPAP does not import either
-//! summary or detail sessions yet.
+//! itself an unconditional `Open` rejection gate. OPAP still does not import
+//! STR summaries; the first detail slice emits partial sessions only from
+//! validated, uncompressed BRP waveform files.
 
 use crate::domain::{DeviceInfo, ImportWarning, WarningSeverity};
 use crate::importer::{
@@ -57,8 +58,13 @@ const STR_EDF: &str = "STR.edf";
 const IDENT_TGT: &str = "Identification.tgt";
 const IDENT_JSON: &str = "Identification.json";
 
+mod session_import;
 mod session_index;
 
+pub use session_import::{
+    RESMED_BRP_MAX_FILE_BYTES, RESMED_BRP_MAX_FILES_PER_IMPORT,
+    RESMED_BRP_MAX_OUTPUT_SAMPLES_PER_IMPORT, RESMED_BRP_MAX_TOTAL_BYTES_PER_IMPORT,
+};
 pub use session_index::{
     RESMED_EDF_HEADER_MAX_BYTES, RESMED_SESSION_INDEX_MAX_ENTRIES,
     RESMED_SESSION_INDEX_MAX_PATH_BYTES, RESMED_SESSION_INDEX_SCHEMA_VERSION,
@@ -128,9 +134,8 @@ pub struct CardDiscovery {
 
 /// Filesystem-independent ResMed importer.
 ///
-/// Discovery, inventory, and bounded EDF header indexing are implemented.
-/// Clinical channel decoding is added in a later porting phase and currently returns
-/// [`ImportErrorKind::UnsupportedOperation`].
+/// Discovery, inventory, bounded EDF header indexing, and an intentionally
+/// partial uncompressed-BRP waveform import are implemented.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ResmedImporter;
 
@@ -362,19 +367,9 @@ impl Importer for ResmedImporter {
     fn import(
         &self,
         source: &dyn ImportSource,
-        _options: &ImportOptions,
+        options: &ImportOptions,
     ) -> Result<crate::domain::ImportReport, ImportError> {
-        if self.discover(source)?.is_none() {
-            return Err(ImportError::new(
-                ImportErrorKind::UnsupportedSource,
-                "source is not a ResMed card",
-            ));
-        }
-
-        Err(ImportError::new(
-            ImportErrorKind::UnsupportedOperation,
-            "ResMed clinical session decoding and import are not implemented yet",
-        ))
+        session_import::import_resmed_sessions(source, options)
     }
 }
 
@@ -1128,13 +1123,13 @@ mod tests {
     }
 
     #[test]
-    fn session_import_reports_intentionally_unimplemented_parser() {
+    fn session_import_requires_explicit_clock_context() {
         let source = memory_card(Some((IDENT_TGT, b"#SRN 123\n")));
 
         let error = ResmedImporter
             .import(&source, &ImportOptions::default())
-            .expect_err("EDF parser is intentionally pending");
+            .expect_err("clock context is required");
 
-        assert_eq!(error.kind, ImportErrorKind::UnsupportedOperation);
+        assert_eq!(error.kind, ImportErrorKind::InvalidConfiguration);
     }
 }

@@ -2153,14 +2153,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "opap-channels"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "opap-core"
 version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
+ "opap-channels",
  "opap-edf",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

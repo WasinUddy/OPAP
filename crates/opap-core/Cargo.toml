@@ -20,9 +20,11 @@ default = ["native-fs"]
 native-fs = ["dep:cap-fs-ext", "dep:cap-std"]
 
 [dependencies]
+opap-channels = { version = "0.1.0", path = "../opap-channels" }
 opap-edf = { version = "0.1.0", path = "../opap-edf" }
 serde.workspace = true
 serde_json.workspace = true
+sha2 = { version = "0.10.9", default-features = false }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 cap-fs-ext = { version = "4.0.2", optional = true }

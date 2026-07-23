@@ -1,5 +1,5 @@
 // Copyright (C) 2011-2018 Mark Watkins
-// Copyright (C) 2019-2026 The OSCAR Team
+// Copyright (c) 2019-2025 The OSCAR Team
 // Copyright (C) 2026 OPAP contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //

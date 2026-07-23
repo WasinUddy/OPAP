@@ -1,5 +1,5 @@
 // Copyright (C) 2011-2018 Mark Watkins
-// Copyright (C) 2019-2026 The OSCAR Team
+// Copyright (C) 2019-2025 The OSCAR Team
 // Copyright (C) 2026 OPAP contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
@@ -16,7 +16,7 @@
 //! builds can use [`DirectorySource`], while a future WebAssembly wrapper can
 //! provide an in-memory implementation backed by browser-selected files.
 
-use crate::domain::{DeviceInfo, ImportReport, ImportWarning, UnixMillis};
+use crate::domain::{DeviceInfo, DeviceLocalDateTime, ImportReport, ImportWarning, UnixMillis};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -287,6 +287,14 @@ pub struct ImportOptions {
     pub sessions_not_before_unix_ms: Option<UnixMillis>,
     /// Include high-resolution waveform samples in returned sessions.
     pub include_waveforms: bool,
+    /// Explicit device-clock context used to normalize source-local timestamps.
+    ///
+    /// This remains optional at the shared importer boundary because older
+    /// serialized options did not carry a clock. Importers whose source format
+    /// contains local wall times must reject an absent or invalid context
+    /// instead of consulting the host clock or guessing a timezone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock_context: Option<ImportClockContext>,
 }
 
 impl Default for ImportOptions {
@@ -294,8 +302,30 @@ impl Default for ImportOptions {
         Self {
             sessions_not_before_unix_ms: None,
             include_waveforms: true,
+            clock_context: None,
         }
     }
+}
+
+/// Caller-supplied context for interpreting device-local wall times.
+///
+/// `applied_utc_offset_seconds` is a fixed signed offset: positive values mean
+/// the device-local clock is ahead of UTC. The device correction is added to
+/// the raw device time before subtracting that offset. Importers validate the
+/// calendar fields, offset range, and all checked timestamp arithmetic before
+/// emitting normalized timestamps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportClockContext {
+    /// Current device-local wall clock used for source plausibility checks.
+    pub current_device_local_time: DeviceLocalDateTime,
+    /// Fixed signed seconds by which device-local wall time is ahead of UTC.
+    pub applied_utc_offset_seconds: i32,
+    /// Signed correction added to raw device-local timestamps.
+    #[serde(default)]
+    pub device_clock_correction_ms: i64,
+    /// Provenance for the selected fixed offset, such as a user setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone_basis: Option<String>,
 }
 
 /// Result of probing an import source without importing therapy sessions.
