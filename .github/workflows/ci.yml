@@ -100,7 +100,7 @@ jobs:
           components: clippy
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: clippy
 
@@ -123,7 +123,7 @@ jobs:
           toolchain: 1.97.1
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: tests
 
@@ -148,7 +148,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: wasm
 
@@ -176,7 +176,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Restore compatibility-harness cache
-        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: oscar-compat
           workspaces: compat -> target
@@ -222,7 +222,7 @@ jobs:
 
       - name: Restore Rust cache
         if: steps.acceptance.outputs.present == 'true'
-        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: cucumber
           workspaces: tests/acceptance -> target
@@ -372,7 +372,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Restore native host Rust cache
-        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: desktop-native-macos
           workspaces: apps/desktop/src-tauri -> target
@@ -456,7 +456,7 @@ jobs:
           toolchain: 1.97.1
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: release
 
