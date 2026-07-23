@@ -78,7 +78,9 @@ impl ApiError {
                 "the selected data file does not belong to OPAP",
             ),
             StorageError::InvalidImportTransition { .. }
-            | StorageError::ImportTimestampRegression { .. } => Self::new(
+            | StorageError::ImportTimestampRegression { .. }
+            | StorageError::ImportInterrupted
+            | StorageError::StaleImportExecution { .. } => Self::new(
                 ApiErrorCode::Conflict,
                 "the requested import job update conflicts with its current state",
             ),
@@ -329,6 +331,20 @@ mod tests {
         assert_eq!(integrity.code, ApiErrorCode::StorageUnavailable);
         assert!(!integrity.retryable);
         assert!(!integrity.message.contains("/Users"));
+    }
+
+    #[test]
+    fn interrupted_and_stale_import_executions_are_safe_conflicts() {
+        for error in [
+            StorageError::ImportInterrupted,
+            StorageError::StaleImportExecution { id: 42 },
+        ] {
+            let api = ApiError::storage(error);
+            assert_eq!(api.code, ApiErrorCode::Conflict);
+            assert!(!api.retryable);
+            assert!(!api.message.contains("42"));
+            assert!(!api.message.contains("opap-execution:"));
+        }
     }
 
     #[test]

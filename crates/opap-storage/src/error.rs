@@ -91,6 +91,12 @@ pub enum Error {
         previous_at_ms: i64,
         attempted_at_ms: i64,
     },
+
+    #[error("import execution was interrupted at a cooperative checkpoint")]
+    ImportInterrupted,
+
+    #[error("import job {id} execution lease is no longer current")]
+    StaleImportExecution { id: i64 },
 }
 
 impl Error {
@@ -108,9 +114,10 @@ impl Error {
             | Self::InvalidSchemaFingerprint(_)
             | Self::UnexpectedApplicationId { .. } => ErrorCategory::Schema,
             Self::ForeignKeyViolation { .. } | Self::Integrity(_) => ErrorCategory::Integrity,
-            Self::InvalidImportTransition { .. } | Self::ImportTimestampRegression { .. } => {
-                ErrorCategory::ImportState
-            }
+            Self::InvalidImportTransition { .. }
+            | Self::ImportTimestampRegression { .. }
+            | Self::ImportInterrupted
+            | Self::StaleImportExecution { .. } => ErrorCategory::ImportState,
         }
     }
 
@@ -209,5 +216,16 @@ mod tests {
         };
         assert_eq!(import_state.category(), ErrorCategory::ImportState);
         assert_eq!(import_state.category().as_str(), "import_state");
+
+        let interrupted = Error::ImportInterrupted;
+        assert_eq!(interrupted.category(), ErrorCategory::ImportState);
+        assert_eq!(
+            interrupted.to_string(),
+            "import execution was interrupted at a cooperative checkpoint"
+        );
+
+        let stale = Error::StaleImportExecution { id: 7 };
+        assert_eq!(stale.category(), ErrorCategory::ImportState);
+        assert!(!stale.to_string().contains("opap-execution:"));
     }
 }

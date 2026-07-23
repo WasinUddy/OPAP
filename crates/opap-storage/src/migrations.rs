@@ -2,7 +2,7 @@ use crate::{Error, Result};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 pub const APPLICATION_ID: i32 = i32::from_be_bytes(*b"OPAP");
-pub const LATEST_SCHEMA_VERSION: i64 = 8;
+pub const LATEST_SCHEMA_VERSION: i64 = 9;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationRecord {
@@ -16,6 +16,8 @@ struct Migration {
     name: &'static str,
     sql: &'static str,
 }
+
+const V9_MIGRATION_SQL: &str = include_str!("../migrations/0009_atomic_import_commits.sql");
 
 const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -57,6 +59,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 8,
         name: "session_snapshots",
         sql: include_str!("../migrations/0008_session_snapshots.sql"),
+    },
+    Migration {
+        version: 9,
+        name: "atomic_import_commits",
+        sql: V9_MIGRATION_SQL,
     },
 ];
 
@@ -186,7 +193,12 @@ fn validate_schema_fingerprint(connection: &Connection) -> Result<()> {
             "SELECT id, profile_id, machine_id, import_key, source_uri, loader_name, attempt, \
              retry_of_id, status, state_message, created_at_ms, updated_at_ms, started_at_ms, \
              completed_at_ms, sessions_created, sessions_updated, events_written, \
-             waveform_chunks_written, error_message FROM import_history LIMIT 0",
+             waveform_chunks_written, error_message, source_fingerprint, input_digest, \
+             options_digest, execution_generation, execution_token FROM import_history LIMIT 0",
+        ),
+        (
+            "import_session_results",
+            "SELECT import_id, session_id, outcome FROM import_session_results LIMIT 0",
         ),
         (
             "session_provenance",
@@ -239,6 +251,10 @@ fn validate_schema_fingerprint(connection: &Connection) -> Result<()> {
             "session_slices_by_time",
             "onsession_slices(session_id,started_at_ms,sequence)",
         ),
+        (
+            "import_session_results_by_session",
+            "onimport_session_results(session_id,import_id)",
+        ),
     ];
     const TRIGGERS: &[&str] = &[
         "waveforms_validate_encoding_insert",
@@ -258,6 +274,13 @@ fn validate_schema_fingerprint(connection: &Connection) -> Result<()> {
         "import_history_protect_terminal_state",
         "import_history_validate_retry_time_insert",
         "import_history_protect_terminal_links",
+        "import_history_validate_execution_identity",
+        "import_history_validate_execution_outcome_code",
+        "import_history_validate_execution_state",
+        "import_history_validate_generation_state",
+        "import_session_results_validate_job_insert",
+        "import_session_results_protect_update",
+        "import_session_results_protect_delete",
     ];
 
     for (table, probe) in TABLES {
@@ -305,6 +328,12 @@ fn validate_schema_fingerprint(connection: &Connection) -> Result<()> {
         "opap-request:legacy-",
         "unique(profile_id,import_key,attempt)",
         "retry_of_idintegeruniquereferencesimport_history(id)ondeletesetnull",
+        "source_fingerprinttextnotnulldefault''check(source_fingerprint=''or(length(cast(source_fingerprintasblob))=64",
+        "input_digesttextnotnulldefault''check(input_digest=''or(length(cast(input_digestasblob))=64",
+        "options_digesttextnotnulldefault''check(options_digest=''or(length(cast(options_digestasblob))=64",
+        "execution_generationintegernotnulldefault0check(execution_generation>=0)",
+        "execution_tokentextcheck(execution_tokenisnullor(status='running'andexecution_generation>0",
+        "substr(execution_token,1,15)='opap-execution:'",
     ] {
         if !import_sql.contains(required) {
             return Err(Error::InvalidSchemaFingerprint(
@@ -324,6 +353,41 @@ fn validate_schema_fingerprint(connection: &Connection) -> Result<()> {
         ));
     }
 
+    for trigger in [
+        "import_history_protect_terminal_state",
+        "import_history_validate_execution_identity",
+        "import_history_validate_execution_outcome_code",
+        "import_history_validate_execution_state",
+        "import_history_validate_generation_state",
+        "import_session_results_validate_job_insert",
+        "import_session_results_protect_update",
+        "import_session_results_protect_delete",
+    ] {
+        let actual = require_schema_object(connection, "trigger", trigger)?;
+        let expected = v9_migration_trigger_sql(trigger)?;
+        if canonical_trigger_sql(&actual) != canonical_trigger_sql(expected) {
+            return Err(Error::InvalidSchemaFingerprint(format!(
+                "critical trigger {trigger:?} does not match its canonical guard"
+            )));
+        }
+    }
+
+    let result_sql = compact_schema_sql(&require_schema_object(
+        connection,
+        "table",
+        "import_session_results",
+    )?);
+    for required in [
+        "outcometextnotnullcheck(outcomein('created','updated','unchanged'))",
+        "primarykey(import_id,session_id)",
+    ] {
+        if !result_sql.contains(required) {
+            return Err(Error::InvalidSchemaFingerprint(
+                "import session result constraints are incomplete".to_owned(),
+            ));
+        }
+    }
+
     for (table, expected_count) in [
         ("profiles", 0_i64),
         ("machines", 1),
@@ -337,6 +401,7 @@ fn validate_schema_fingerprint(connection: &Connection) -> Result<()> {
         ("session_summary", 1),
         ("summary_metrics", 1),
         ("session_settings", 1),
+        ("import_session_results", 2),
     ] {
         let sql = format!("SELECT COUNT(*) FROM pragma_foreign_key_list('{table}')");
         let count: i64 = connection.query_row(&sql, [], |row| row.get(0))?;
@@ -418,6 +483,27 @@ fn compact_schema_sql(sql: &str) -> String {
         .filter(|character| !character.is_whitespace())
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+fn canonical_trigger_sql(sql: &str) -> &str {
+    let trimmed = sql.trim();
+    trimmed.strip_suffix(';').unwrap_or(trimmed).trim_end()
+}
+
+fn v9_migration_trigger_sql(name: &str) -> Result<&'static str> {
+    let marker = format!("CREATE TRIGGER {name}\n");
+    let start = V9_MIGRATION_SQL.find(&marker).ok_or_else(|| {
+        Error::InvalidSchemaFingerprint(format!(
+            "critical trigger {name:?} is absent from the canonical v9 migration"
+        ))
+    })?;
+    let statement = &V9_MIGRATION_SQL[start..];
+    let end = statement.find("\nEND;").ok_or_else(|| {
+        Error::InvalidSchemaFingerprint(format!(
+            "critical trigger {name:?} is incomplete in the canonical v9 migration"
+        ))
+    })?;
+    Ok(&statement[..end + "\nEND".len()])
 }
 
 fn validate_foreign_keys(connection: &Connection) -> Result<()> {

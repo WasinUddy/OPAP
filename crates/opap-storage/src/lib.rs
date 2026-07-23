@@ -5,6 +5,7 @@
 //! crate back to an importer or analysis engine.
 
 mod error;
+mod import_commit;
 mod migrations;
 mod model;
 mod replacement;

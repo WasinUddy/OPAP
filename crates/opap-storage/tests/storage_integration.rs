@@ -93,6 +93,11 @@ fn database_at_schema_version(
             "opaque_import_keys",
             include_str!("../migrations/0007_opaque_import_keys.sql"),
         ),
+        (
+            8_i64,
+            "session_snapshots",
+            include_str!("../migrations/0008_session_snapshots.sql"),
+        ),
     ];
     for (migration_version, name, sql) in migrations.into_iter().take(version) {
         connection.execute_batch(sql)?;
@@ -218,6 +223,7 @@ fn migrates_new_database_and_reopening_is_a_noop() -> TestResult {
             (6, "import_history_link_integrity"),
             (7, "opaque_import_keys"),
             (8, "session_snapshots"),
+            (9, "atomic_import_commits"),
         ]
     );
     assert!(migrations.iter().all(|item| item.applied_at_ms > 0));
@@ -244,7 +250,10 @@ fn migrates_new_database_and_reopening_is_a_noop() -> TestResult {
 
     let reopened = Database::open(directory.path().join("opap.sqlite3"))?;
     assert_eq!(reopened.schema_version()?, LATEST_SCHEMA_VERSION);
-    assert_eq!(reopened.applied_migrations()?.len(), 8);
+    assert_eq!(
+        reopened.applied_migrations()?.len(),
+        LATEST_SCHEMA_VERSION as usize
+    );
     Ok(())
 }
 
@@ -1914,6 +1923,16 @@ fn v5_redacts_terminal_paths_from_early_v4_databases_before_reprotecting_them() 
          DROP TRIGGER import_history_validate_request_key_insert;
          DROP TRIGGER import_history_validate_request_key_update;
          DROP TRIGGER import_history_protect_import_identity;
+         DROP TRIGGER import_history_validate_execution_identity;
+         DROP TRIGGER import_history_validate_execution_outcome_code;
+         DROP TRIGGER import_history_validate_execution_state;
+         DROP TRIGGER import_history_validate_generation_state;
+         DROP TABLE import_session_results;
+         ALTER TABLE import_history DROP COLUMN execution_token;
+         ALTER TABLE import_history DROP COLUMN execution_generation;
+         ALTER TABLE import_history DROP COLUMN options_digest;
+         ALTER TABLE import_history DROP COLUMN input_digest;
+         ALTER TABLE import_history DROP COLUMN source_fingerprint;
          PRAGMA ignore_check_constraints = ON;",
     )?;
     connection.execute(
@@ -2003,19 +2022,131 @@ fn rejects_foreign_application_ids_and_tampered_migration_names() -> TestResult 
 }
 
 #[test]
+fn rejects_weakened_v9_execution_and_result_triggers_on_open() -> TestResult {
+    for (trigger, replacement) in [
+        (
+            "import_history_validate_execution_identity",
+            "CREATE TRIGGER import_history_validate_execution_identity
+             BEFORE UPDATE OF execution_token ON import_history
+             BEGIN
+                 SELECT RAISE(ABORT, 'weak identity guard');
+             END;",
+        ),
+        (
+            "import_history_validate_execution_outcome_code",
+            "CREATE TRIGGER import_history_validate_execution_outcome_code
+             BEFORE UPDATE OF status ON import_history
+             BEGIN
+                 SELECT RAISE(ABORT, 'weak outcome guard');
+             END;",
+        ),
+        (
+            "import_history_validate_execution_state",
+            "CREATE TRIGGER import_history_validate_execution_state
+             BEFORE UPDATE OF status ON import_history
+             BEGIN
+                 SELECT RAISE(ABORT, 'weak execution state guard');
+             END;",
+        ),
+        (
+            "import_history_validate_generation_state",
+            "CREATE TRIGGER import_history_validate_generation_state
+             BEFORE UPDATE ON import_history
+             BEGIN
+                 SELECT RAISE(ABORT, 'weak generation state guard');
+             END;",
+        ),
+        (
+            "import_session_results_validate_job_insert",
+            "CREATE TRIGGER import_session_results_validate_job_insert
+             BEFORE INSERT ON import_session_results
+             BEGIN
+                 SELECT RAISE(ABORT, 'weak result insert guard');
+             END;",
+        ),
+        (
+            "import_session_results_protect_update",
+            "CREATE TRIGGER import_session_results_protect_update
+             BEFORE UPDATE ON import_session_results
+             BEGIN
+                 SELECT RAISE(ABORT, 'weak result update guard');
+             END;",
+        ),
+        (
+            "import_session_results_protect_delete",
+            "CREATE TRIGGER import_session_results_protect_delete
+             BEFORE DELETE ON import_session_results
+             BEGIN
+                 SELECT RAISE(ABORT, 'weak result delete guard');
+             END;",
+        ),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join(format!("{trigger}.sqlite3"));
+        drop(Database::open(&path)?);
+        let connection = rusqlite::Connection::open(&path)?;
+        connection.execute_batch(&format!("DROP TRIGGER {trigger}; {replacement}"))?;
+        drop(connection);
+
+        let error = Database::open(&path)
+            .err()
+            .expect("weakened critical trigger must be rejected");
+        assert!(
+            matches!(error, StorageError::InvalidSchemaFingerprint(_)),
+            "{trigger} produced {error:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn rejects_v9_trigger_fragments_hidden_in_comments_on_open() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("comment-bypass.sqlite3");
+    drop(Database::open(&path)?);
+    let connection = rusqlite::Connection::open(&path)?;
+    connection.execute_batch(
+        "DROP TRIGGER import_history_validate_execution_outcome_code;
+         CREATE TRIGGER import_history_validate_execution_outcome_code
+         BEFORE UPDATE OF status ON import_history
+         WHEN 0
+         BEGIN
+             /*
+             old.execution_generation>0andold.status<>new.status
+             new.status='blocked'andnew.state_messagein('worker_interrupted','retry_pending','source_unavailable','admin_revoked','recovered_after_restart')
+             new.status='failed'andnew.state_messageisnullandnew.error_messagein('invalid_source','unsupported_source','decode_failed','resource_limit','source_unavailable','internal_failure')
+             new.status='cancelled'andnew.state_message='user_cancelled'
+             new.status='completed'andnew.state_messageisnullandnew.error_messageisnullandnew.machine_idisnotnull
+             new.sessions_created=(selectcount(*)fromimport_session_resultswhereimport_id=new.idandoutcome='created')
+             new.events_written=(selectcount(*)fromimport_session_resultsasresultjoineventsaseventonevent.session_id=result.session_id
+             new.waveform_chunks_written=(selectcount(*)fromimport_session_resultsasresultjoinwaveformsaswaveformonwaveform.session_id=result.session_idjoinwaveform_chunksaschunkonchunk.waveform_id=waveform.id
+             */
+             SELECT RAISE(ABORT, 'invalid import execution outcome code');
+         END;",
+    )?;
+    drop(connection);
+
+    let error = Database::open(&path)
+        .err()
+        .expect("comment-only canonical fragments must not validate a disabled trigger");
+    assert!(matches!(error, StorageError::InvalidSchemaFingerprint(_)));
+    Ok(())
+}
+
+#[test]
 fn rejects_disagreement_between_user_version_and_migration_history() -> TestResult {
     for (case_name, tamper_sql, expected_user, expected_history) in [
         (
             "stale-user-version",
-            "PRAGMA user_version = 7;",
-            7_i64,
+            "PRAGMA user_version = 8;",
             8_i64,
+            9_i64,
         ),
         (
             "missing-history-row",
-            "DELETE FROM schema_migrations WHERE version = 8;",
+            "DELETE FROM schema_migrations WHERE version = 9;",
+            9_i64,
             8_i64,
-            7_i64,
         ),
     ] {
         let directory = tempfile::tempdir()?;

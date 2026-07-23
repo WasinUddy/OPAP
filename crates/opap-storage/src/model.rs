@@ -218,6 +218,21 @@ pub struct ImportHistory {
     pub events_written: i64,
     pub waveform_chunks_written: i64,
     pub error_message: Option<String>,
+    /// Opaque SHA-256 fingerprint of the normalized pre-parse source manifest.
+    /// It is not a digest of only the bytes eventually consumed by a parser.
+    /// Empty only on jobs created before execution metadata was claimed.
+    pub source_fingerprint: String,
+    /// Opaque SHA-256 digest of the normalized pre-parse run input.
+    /// It is not a digest of only the bytes eventually consumed by a parser.
+    /// Empty only on jobs created before execution metadata was claimed.
+    pub input_digest: String,
+    /// Opaque SHA-256 digest of the normalized pre-parse import options.
+    /// Empty only on jobs created before execution metadata was claimed.
+    pub options_digest: String,
+    /// Monotonically increasing execution lease generation.
+    pub execution_generation: i64,
+    /// Process-local execution lease. It is cleared before a job stops running.
+    pub execution_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -316,6 +331,172 @@ pub struct ImportCounts {
 pub struct BeginImport {
     pub history: ImportHistory,
     pub inserted: bool,
+}
+
+pub const EXECUTION_TOKEN_PREFIX: &str = "opap-execution:";
+
+/// Returns true only for service-generated execution lease tokens:
+/// `opap-execution:` followed by exactly 32 lowercase hexadecimal characters.
+pub fn is_canonical_execution_token(value: &str) -> bool {
+    has_lower_hex_suffix(value, EXECUTION_TOKEN_PREFIX)
+}
+
+/// Returns true only for an opaque lowercase SHA-256 value.
+pub fn is_canonical_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+/// Identity assigned when a blocked or legacy running job acquires an
+/// execution lease. Once populated, the three fingerprints are immutable.
+#[derive(Debug, Clone, Copy)]
+pub struct ImportExecutionClaim<'a> {
+    pub profile_id: i64,
+    pub importer_name: &'a str,
+    pub source_fingerprint: &'a str,
+    pub input_digest: &'a str,
+    pub options_digest: &'a str,
+    pub execution_token: &'a str,
+    pub claimed_at_ms: i64,
+}
+
+/// Generation-scoped worker lease used to block or fail only the exact
+/// execution a worker owns. No token value is included in persisted errors.
+#[derive(Debug, Clone, Copy)]
+pub struct ImportExecutionLease<'a> {
+    pub profile_id: i64,
+    pub importer_name: &'a str,
+    pub execution_token: &'a str,
+    pub execution_generation: i64,
+}
+
+/// Stable, non-sensitive codes a worker may persist while blocking its exact
+/// execution lease. Human-readable details remain process-local.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ImportBlockCode {
+    WorkerInterrupted,
+    RetryPending,
+    SourceUnavailable,
+}
+
+impl ImportBlockCode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkerInterrupted => "worker_interrupted",
+            Self::RetryPending => "retry_pending",
+            Self::SourceUnavailable => "source_unavailable",
+        }
+    }
+}
+
+/// Stable, non-sensitive codes a worker may persist while failing its exact
+/// execution lease. Raw parser errors, paths, serials, and tokens are excluded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ImportFailureCode {
+    InvalidSource,
+    UnsupportedSource,
+    DecodeFailed,
+    ResourceLimit,
+    SourceUnavailable,
+    InternalFailure,
+}
+
+impl ImportFailureCode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidSource => "invalid_source",
+            Self::UnsupportedSource => "unsupported_source",
+            Self::DecodeFailed => "decode_failed",
+            Self::ResourceLimit => "resource_limit",
+            Self::SourceUnavailable => "source_unavailable",
+            Self::InternalFailure => "internal_failure",
+        }
+    }
+}
+
+/// A machine produced by an importer. The profile and database row id are
+/// supplied by the atomic commit operation, never by parser output.
+#[derive(Debug, Clone, Copy)]
+pub struct ImportMachineInput<'a> {
+    pub source_key: &'a str,
+    pub device_type: &'a str,
+    pub manufacturer: &'a str,
+    pub model: &'a str,
+    pub model_number: &'a str,
+    pub serial_number: &'a str,
+    pub seen_at_ms: i64,
+}
+
+/// A complete logical session produced by an importer. The machine row id is
+/// resolved inside the same transaction that installs the snapshot.
+#[derive(Debug, Clone, Copy)]
+pub struct ImportSessionSnapshotInput<'a> {
+    pub source_key: &'a str,
+    pub started_at_ms: i64,
+    pub ended_at_ms: Option<i64>,
+    pub timezone_offset_minutes: Option<i32>,
+    pub now_ms: i64,
+    pub snapshot: SessionSnapshotReplacement<'a>,
+}
+
+/// Compare-and-set identity and complete output for one durable import commit.
+#[derive(Debug, Clone, Copy)]
+pub struct ImportCommitInput<'a> {
+    pub profile_id: i64,
+    pub import_id: i64,
+    pub importer_name: &'a str,
+    pub source_fingerprint: &'a str,
+    pub input_digest: &'a str,
+    pub options_digest: &'a str,
+    pub execution_token: &'a str,
+    pub execution_generation: i64,
+    pub machine: ImportMachineInput<'a>,
+    pub sessions: &'a [ImportSessionSnapshotInput<'a>],
+    pub finished_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportSessionOutcome {
+    Created,
+    Updated,
+    Unchanged,
+}
+
+impl ImportSessionOutcome {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Updated => "updated",
+            Self::Unchanged => "unchanged",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "created" => Some(Self::Created),
+            "updated" => Some(Self::Updated),
+            "unchanged" => Some(Self::Unchanged),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportSessionResult {
+    pub import_id: i64,
+    pub session_id: i64,
+    pub outcome: ImportSessionOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportCommitResult {
+    pub history: ImportHistory,
+    pub machine: Machine,
+    pub sessions: Vec<ImportSessionResult>,
 }
 
 /// Typed state-machine commands. Repository methods enforce each command's

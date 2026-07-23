@@ -249,31 +249,47 @@ impl<'connection> SessionSnapshots<'connection> {
         session_id: i64,
         replacement: &SessionSnapshotReplacement<'_>,
     ) -> Result<SnapshotChildStats> {
+        let mut checkpoint = || Ok(());
+        self.replace_with_checkpoint(session_id, replacement, &mut checkpoint)
+    }
+
+    pub(crate) fn replace_with_checkpoint(
+        &self,
+        session_id: i64,
+        replacement: &SessionSnapshotReplacement<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<SnapshotChildStats> {
         let old_slices = self.list_slices(session_id)?;
         let old_metrics = self.list_summary_metrics(session_id)?;
         let old_settings = self.list_settings(session_id)?;
 
+        checkpoint()?;
         self.upsert_provenance(session_id, replacement)?;
 
+        checkpoint()?;
         self.connection.execute(
             "DELETE FROM session_slices WHERE session_id = ?1",
             [session_id],
         )?;
         for slice in replacement.slices {
+            checkpoint()?;
             self.insert_slice(session_id, slice)?;
         }
 
+        checkpoint()?;
         self.connection.execute(
             "INSERT INTO session_summary (session_id, usage_ms)
              VALUES (?1, ?2)
              ON CONFLICT(session_id) DO UPDATE SET usage_ms = excluded.usage_ms",
             params![session_id, replacement.summary.usage_ms],
         )?;
+        checkpoint()?;
         self.connection.execute(
             "DELETE FROM summary_metrics WHERE session_id = ?1",
             [session_id],
         )?;
         for metric in replacement.summary.metrics {
+            checkpoint()?;
             self.connection.execute(
                 "INSERT INTO summary_metrics (session_id, metric_key, value, unit)
                  VALUES (?1, ?2, ?3, ?4)",
@@ -281,11 +297,13 @@ impl<'connection> SessionSnapshots<'connection> {
             )?;
         }
 
+        checkpoint()?;
         self.connection.execute(
             "DELETE FROM session_settings WHERE session_id = ?1",
             [session_id],
         )?;
         for setting in replacement.settings {
+            checkpoint()?;
             self.insert_setting(session_id, setting)?;
         }
 

@@ -1,6 +1,8 @@
 use crate::{
-    BeginImport, Error, ImportCounts, ImportHistory, ImportStatus, ImportTransition, NewImport,
-    Result, RetryImport, is_canonical_request_id, is_persistable_import_key,
+    BeginImport, Error, ImportBlockCode, ImportCounts, ImportExecutionClaim, ImportExecutionLease,
+    ImportFailureCode, ImportHistory, ImportSessionOutcome, ImportSessionResult, ImportStatus,
+    ImportTransition, NewImport, Result, RetryImport, is_canonical_execution_token,
+    is_canonical_request_id, is_canonical_sha256, is_persistable_import_key,
     is_persistable_source_id,
 };
 use rusqlite::{Connection, OptionalExtension, params, types::Type};
@@ -9,7 +11,8 @@ use std::io;
 const COLUMNS: &str = "id, profile_id, machine_id, import_key, source_uri, loader_name, \
     attempt, retry_of_id, status, state_message, created_at_ms, updated_at_ms, started_at_ms, \
     completed_at_ms, sessions_created, sessions_updated, events_written, \
-    waveform_chunks_written, error_message";
+    waveform_chunks_written, error_message, source_fingerprint, input_digest, options_digest, \
+    execution_generation, execution_token";
 
 #[derive(Clone, Copy)]
 pub struct Imports<'connection> {
@@ -114,6 +117,194 @@ impl<'connection> Imports<'connection> {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Acquires a generation-scoped execution lease for a blocked job, or for a
+    /// legacy running job that does not yet have a lease. Immutable digests make
+    /// later commit compare-and-set checks independent of process-local state.
+    pub fn claim_execution(
+        &self,
+        id: i64,
+        claim: &ImportExecutionClaim<'_>,
+    ) -> Result<Option<ImportHistory>> {
+        validate_execution_claim(claim)?;
+        let sql = format!(
+            "UPDATE import_history SET
+                 status = 'running',
+                 state_message = NULL,
+                 updated_at_ms = ?2,
+                 started_at_ms = COALESCE(started_at_ms, ?2),
+                 source_fingerprint = ?3,
+                 input_digest = ?4,
+                 options_digest = ?5,
+                 execution_generation = execution_generation + 1,
+                 execution_token = ?6
+             WHERE id = ?1
+               AND status IN ('blocked', 'running')
+               AND execution_token IS NULL
+               AND ?2 >= updated_at_ms
+               AND (source_fingerprint = '' OR source_fingerprint = ?3)
+               AND (input_digest = '' OR input_digest = ?4)
+               AND (options_digest = '' OR options_digest = ?5)
+               AND profile_id = ?7
+               AND loader_name = ?8
+             RETURNING {COLUMNS}"
+        );
+        let claimed = self
+            .connection
+            .query_row(
+                &sql,
+                params![
+                    id,
+                    claim.claimed_at_ms,
+                    claim.source_fingerprint,
+                    claim.input_digest,
+                    claim.options_digest,
+                    claim.execution_token,
+                    claim.profile_id,
+                    claim.importer_name,
+                ],
+                map_import,
+            )
+            .optional()?;
+        if claimed.is_some() {
+            return Ok(claimed);
+        }
+        match self.get(id)? {
+            None => Ok(None),
+            Some(history) if claim.claimed_at_ms < history.updated_at_ms => {
+                Err(Error::ImportTimestampRegression {
+                    id,
+                    previous_at_ms: history.updated_at_ms,
+                    attempted_at_ms: claim.claimed_at_ms,
+                })
+            }
+            Some(history) => Err(Error::InvalidImportTransition {
+                id,
+                from: history.status.as_str().to_owned(),
+                operation: "claim execution",
+            }),
+        }
+    }
+
+    pub fn list_session_results(&self, import_id: i64) -> Result<Vec<ImportSessionResult>> {
+        let mut statement = self.connection.prepare(
+            "SELECT import_id, session_id, outcome
+             FROM import_session_results
+             WHERE import_id = ?1
+             ORDER BY session_id",
+        )?;
+        let rows = statement.query_map([import_id], |row| {
+            let import_id = row.get(0)?;
+            let session_id = row.get(1)?;
+            let raw_outcome: String = row.get(2)?;
+            let outcome = ImportSessionOutcome::from_str(&raw_outcome).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    Type::Text,
+                    Box::new(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("unknown import session outcome {raw_outcome:?}"),
+                    )),
+                )
+            })?;
+            Ok(ImportSessionResult {
+                import_id,
+                session_id,
+                outcome,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Blocks only the exact running execution lease owned by a worker. Generic
+    /// [`Self::block`] remains available for recovery or administrative
+    /// revocation when deliberately invalidating whichever lease is current.
+    pub fn block_execution(
+        &self,
+        id: i64,
+        lease: &ImportExecutionLease<'_>,
+        at_ms: i64,
+        code: ImportBlockCode,
+    ) -> Result<Option<ImportHistory>> {
+        validate_execution_lease(lease)?;
+        let sql = format!(
+            "UPDATE import_history SET
+                 status = 'blocked',
+                 state_message = ?2,
+                 updated_at_ms = ?3,
+                 execution_token = NULL
+             WHERE id = ?1
+               AND profile_id = ?4
+               AND loader_name = ?5
+               AND status = 'running'
+               AND execution_token = ?6
+               AND execution_generation = ?7
+               AND ?3 >= updated_at_ms
+             RETURNING {COLUMNS}"
+        );
+        let updated = self
+            .connection
+            .query_row(
+                &sql,
+                params![
+                    id,
+                    code.as_str(),
+                    at_ms,
+                    lease.profile_id,
+                    lease.importer_name,
+                    lease.execution_token,
+                    lease.execution_generation,
+                ],
+                map_import,
+            )
+            .optional()?;
+        self.resolve_execution_update(id, at_ms, updated)
+    }
+
+    /// Fails only the exact running execution lease owned by a worker.
+    pub fn fail_execution(
+        &self,
+        id: i64,
+        lease: &ImportExecutionLease<'_>,
+        at_ms: i64,
+        code: ImportFailureCode,
+    ) -> Result<Option<ImportHistory>> {
+        validate_execution_lease(lease)?;
+        let sql = format!(
+            "UPDATE import_history SET
+                 status = 'failed',
+                 state_message = NULL,
+                 updated_at_ms = ?2,
+                 completed_at_ms = ?2,
+                 error_message = ?3,
+                 execution_token = NULL
+             WHERE id = ?1
+               AND profile_id = ?4
+               AND loader_name = ?5
+               AND status = 'running'
+               AND execution_token = ?6
+               AND execution_generation = ?7
+               AND ?2 >= updated_at_ms
+             RETURNING {COLUMNS}"
+        );
+        let updated = self
+            .connection
+            .query_row(
+                &sql,
+                params![
+                    id,
+                    at_ms,
+                    code.as_str(),
+                    lease.profile_id,
+                    lease.importer_name,
+                    lease.execution_token,
+                    lease.execution_generation,
+                ],
+                map_import,
+            )
+            .optional()?;
+        self.resolve_execution_update(id, at_ms, updated)
+    }
+
     /// Applies a typed state-machine command. A missing id returns `None`; a row
     /// in an illegal source state returns `InvalidImportTransition`.
     pub fn transition(
@@ -128,7 +319,13 @@ impl<'connection> Imports<'connection> {
                     "block",
                     &format!(
                         "UPDATE import_history SET
-                             status = 'blocked', state_message = ?2, updated_at_ms = ?3
+                             status = 'blocked',
+                             state_message = CASE
+                                 WHEN execution_generation > 0 THEN 'admin_revoked'
+                                 ELSE ?2
+                             END,
+                             updated_at_ms = ?3,
+                             execution_token = NULL
                          WHERE id = ?1 AND status = 'running' AND ?3 >= updated_at_ms
                          RETURNING {COLUMNS}"
                     ),
@@ -147,6 +344,11 @@ impl<'connection> Imports<'connection> {
                              updated_at_ms = ?2,
                              started_at_ms = COALESCE(started_at_ms, ?2)
                          WHERE id = ?1 AND status = 'blocked' AND ?2 >= updated_at_ms
+                           AND execution_generation = 0
+                           AND execution_token IS NULL
+                           AND source_fingerprint = ''
+                           AND input_digest = ''
+                           AND options_digest = ''
                          RETURNING {COLUMNS}"
                     ),
                     params![id, at_ms],
@@ -164,8 +366,14 @@ impl<'connection> Imports<'connection> {
                              updated_at_ms = ?2, completed_at_ms = ?2,
                              sessions_created = ?3, sessions_updated = ?4,
                              events_written = ?5, waveform_chunks_written = ?6,
-                             error_message = NULL
-                         WHERE id = ?1 AND status = 'running' AND ?2 >= updated_at_ms
+                             error_message = NULL, execution_token = NULL
+                         WHERE id = ?1 AND status = 'running'
+                           AND execution_generation = 0
+                           AND execution_token IS NULL
+                           AND source_fingerprint = ''
+                           AND input_digest = ''
+                           AND options_digest = ''
+                           AND ?2 >= updated_at_ms
                          RETURNING {COLUMNS}"
                     ),
                     params![
@@ -188,8 +396,14 @@ impl<'connection> Imports<'connection> {
                         "UPDATE import_history SET
                              status = 'failed', state_message = NULL,
                              updated_at_ms = ?2, completed_at_ms = ?2,
-                             error_message = ?3
-                         WHERE id = ?1 AND status = 'running' AND ?2 >= updated_at_ms
+                             error_message = ?3, execution_token = NULL
+                         WHERE id = ?1 AND status = 'running'
+                           AND execution_generation = 0
+                           AND execution_token IS NULL
+                           AND source_fingerprint = ''
+                           AND input_digest = ''
+                           AND options_digest = ''
+                           AND ?2 >= updated_at_ms
                          RETURNING {COLUMNS}"
                     ),
                     params![id, at_ms, error],
@@ -203,9 +417,13 @@ impl<'connection> Imports<'connection> {
                     "cancel",
                     &format!(
                         "UPDATE import_history SET
-                             status = 'cancelled', state_message = ?2,
+                             status = 'cancelled',
+                             state_message = CASE
+                                 WHEN execution_generation > 0 THEN 'user_cancelled'
+                                 ELSE ?2
+                             END,
                              updated_at_ms = ?3, completed_at_ms = ?3,
-                             error_message = NULL
+                             error_message = NULL, execution_token = NULL
                          WHERE id = ?1 AND status IN ('blocked', 'running')
                            AND ?3 >= updated_at_ms
                          RETURNING {COLUMNS}"
@@ -295,8 +513,13 @@ impl<'connection> Imports<'connection> {
     pub fn recover_running(&self, at_ms: i64, reason: &str) -> Result<Vec<ImportHistory>> {
         let sql = format!(
             "UPDATE import_history SET
-                 status = 'blocked', state_message = ?1,
-                 updated_at_ms = max(updated_at_ms, ?2)
+                 status = 'blocked',
+                 state_message = CASE
+                     WHEN execution_generation > 0 THEN 'recovered_after_restart'
+                     ELSE ?1
+                 END,
+                 updated_at_ms = max(updated_at_ms, ?2),
+                 execution_token = NULL
              WHERE status = 'running' RETURNING {COLUMNS}"
         );
         let mut statement = self.connection.prepare(&sql)?;
@@ -411,6 +634,28 @@ impl<'connection> Imports<'connection> {
             .query_row(sql, parameters, map_import)
             .optional()?)
     }
+
+    fn resolve_execution_update(
+        &self,
+        id: i64,
+        attempted_at_ms: i64,
+        updated: Option<ImportHistory>,
+    ) -> Result<Option<ImportHistory>> {
+        if updated.is_some() {
+            return Ok(updated);
+        }
+        match self.get(id)? {
+            None => Ok(None),
+            Some(history) if attempted_at_ms < history.updated_at_ms => {
+                Err(Error::ImportTimestampRegression {
+                    id,
+                    previous_at_ms: history.updated_at_ms,
+                    attempted_at_ms,
+                })
+            }
+            Some(_) => Err(Error::StaleImportExecution { id }),
+        }
+    }
 }
 
 fn map_import(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImportHistory> {
@@ -445,5 +690,54 @@ fn map_import(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImportHistory> {
         events_written: row.get(16)?,
         waveform_chunks_written: row.get(17)?,
         error_message: row.get(18)?,
+        source_fingerprint: row.get(19)?,
+        input_digest: row.get(20)?,
+        options_digest: row.get(21)?,
+        execution_generation: row.get(22)?,
+        execution_token: row.get(23)?,
     })
+}
+
+fn validate_execution_claim(claim: &ImportExecutionClaim<'_>) -> Result<()> {
+    validate_execution_lease(&ImportExecutionLease {
+        profile_id: claim.profile_id,
+        importer_name: claim.importer_name,
+        execution_token: claim.execution_token,
+        execution_generation: 1,
+    })?;
+    for (field, value) in [
+        ("source fingerprint", claim.source_fingerprint),
+        ("input digest", claim.input_digest),
+        ("options digest", claim.options_digest),
+    ] {
+        if !is_canonical_sha256(value) {
+            return Err(Error::Integrity(format!(
+                "{field} must be exactly 64 lowercase hexadecimal characters"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_execution_lease(lease: &ImportExecutionLease<'_>) -> Result<()> {
+    if lease.profile_id <= 0 || lease.execution_generation <= 0 {
+        return Err(Error::Integrity(
+            "execution lease profile id and generation must be positive".to_owned(),
+        ));
+    }
+    if lease.importer_name.is_empty()
+        || lease.importer_name.len() > 128
+        || lease.importer_name.as_bytes().contains(&0)
+    {
+        return Err(Error::Integrity(
+            "execution lease importer name must be non-empty and at most 128 bytes without NUL characters"
+                .to_owned(),
+        ));
+    }
+    if !is_canonical_execution_token(lease.execution_token) {
+        return Err(Error::Integrity(
+            "execution token must be a service-generated OPAP identifier".to_owned(),
+        ));
+    }
+    Ok(())
 }

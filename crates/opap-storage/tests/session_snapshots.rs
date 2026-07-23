@@ -237,6 +237,11 @@ fn create_legacy_database(path: &Path, version: usize) -> Result<(), Box<dyn Err
             "opaque_import_keys",
             include_str!("../migrations/0007_opaque_import_keys.sql"),
         ),
+        (
+            8_i64,
+            "session_snapshots",
+            include_str!("../migrations/0008_session_snapshots.sql"),
+        ),
     ];
     for (migration_version, name, sql) in migrations.into_iter().take(version) {
         connection.execute_batch(sql)?;
@@ -271,9 +276,9 @@ fn create_legacy_database(path: &Path, version: usize) -> Result<(), Box<dyn Err
 }
 
 #[test]
-fn fresh_v8_schema_has_all_strict_snapshot_tables() -> TestResult {
+fn fresh_schema_has_all_strict_snapshot_tables() -> TestResult {
     let database = Database::open_in_memory()?;
-    assert_eq!(database.schema_version()?, 8);
+    assert_eq!(database.schema_version()?, LATEST_SCHEMA_VERSION);
     for table in [
         "session_provenance",
         "session_slices",
@@ -293,14 +298,14 @@ fn fresh_v8_schema_has_all_strict_snapshot_tables() -> TestResult {
             .applied_migrations()?
             .last()
             .map(|migration| (migration.version, migration.name.as_str())),
-        Some((8, "session_snapshots"))
+        Some((9, "atomic_import_commits"))
     );
     Ok(())
 }
 
 #[test]
-fn upgrades_every_v1_through_v7_database_without_losing_sessions() -> TestResult {
-    for version in 1_usize..=7 {
+fn upgrades_every_v1_through_v8_database_without_losing_sessions() -> TestResult {
+    for version in 1_usize..=8 {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join(format!("legacy-v{version}.sqlite3"));
         create_legacy_database(&path, version)?;
@@ -309,7 +314,10 @@ fn upgrades_every_v1_through_v7_database_without_losing_sessions() -> TestResult
         assert_eq!(database.schema_version()?, LATEST_SCHEMA_VERSION);
         assert!(database.sessions().get(1)?.is_some());
         assert!(database.session_snapshots().get(1)?.is_none());
-        assert_eq!(database.applied_migrations()?.len(), 8);
+        assert_eq!(
+            database.applied_migrations()?.len(),
+            LATEST_SCHEMA_VERSION as usize
+        );
     }
     Ok(())
 }
@@ -345,6 +353,83 @@ fn failed_v8_migration_rolls_back_all_prior_statements() -> TestResult {
     }
     let incompatible_column: String = unchanged.query_row(
         "SELECT name FROM pragma_table_info('session_summary')",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(incompatible_column, "incompatible");
+    Ok(())
+}
+
+#[test]
+fn v9_migration_gives_legacy_jobs_safe_empty_execution_defaults() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("v8-execution-defaults.sqlite3");
+    create_legacy_database(&path, 8)?;
+    let connection = rusqlite::Connection::open(&path)?;
+    connection.execute(
+        "INSERT INTO import_history (
+             id, profile_id, import_key, source_uri, loader_name, attempt,
+             status, created_at_ms, updated_at_ms
+         ) VALUES (
+             1, 1,
+             'opap-request:00000000000000000000000000000001',
+             'opap-source:00000000000000000000000000000001',
+             'resmed', 1, 'blocked', 1, 1
+         )",
+        [],
+    )?;
+    drop(connection);
+
+    let database = Database::open(&path)?;
+    let history = database.imports().get(1)?.expect("migrated import job");
+    assert_eq!(history.source_fingerprint, "");
+    assert_eq!(history.input_digest, "");
+    assert_eq!(history.options_digest, "");
+    assert_eq!(history.execution_generation, 0);
+    assert_eq!(history.execution_token, None);
+    assert!(
+        database
+            .imports()
+            .list_session_results(history.id)?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn failed_v9_migration_rolls_back_added_columns_and_tables() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("v9-rollback.sqlite3");
+    create_legacy_database(&path, 8)?;
+    let connection = rusqlite::Connection::open(&path)?;
+    connection.execute_batch(
+        "CREATE TABLE import_session_results (
+             incompatible TEXT NOT NULL
+         ) STRICT;",
+    )?;
+    drop(connection);
+
+    assert!(Database::open(&path).is_err());
+    let unchanged = rusqlite::Connection::open(&path)?;
+    let user_version: i64 = unchanged.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let history_version: i64 =
+        unchanged.query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })?;
+    assert_eq!((user_version, history_version), (8, 8));
+    let added_columns: i64 = unchanged.query_row(
+        "SELECT COUNT(*)
+         FROM pragma_table_info('import_history')
+         WHERE name IN (
+             'source_fingerprint', 'input_digest', 'options_digest',
+             'execution_generation', 'execution_token'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(added_columns, 0);
+    let incompatible_column: String = unchanged.query_row(
+        "SELECT name FROM pragma_table_info('import_session_results')",
         [],
         |row| row.get(0),
     )?;

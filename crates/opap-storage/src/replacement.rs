@@ -55,29 +55,83 @@ impl Database {
     ) -> Result<SessionSnapshotReplacementResult> {
         validate_session_snapshot(session, replacement)?;
         let transaction = self.transaction()?;
-        let session = Sessions::new(&transaction).upsert(session)?;
-        let session_data = replace_session_data_on(&transaction, session.id, &replacement.data)?;
-        let children = SessionSnapshots::new(&transaction).replace(session.id, replacement)?;
+        let result = replace_session_snapshot_on(&transaction, session, replacement)?;
         transaction.commit()?;
-        Ok(SessionSnapshotReplacementResult {
-            session,
-            stats: SessionSnapshotReplacementStats {
-                session_data,
-                slices_written: children.slices_written,
-                slices_pruned: children.slices_pruned,
-                summary_metrics_written: children.summary_metrics_written,
-                summary_metrics_pruned: children.summary_metrics_pruned,
-                settings_written: children.settings_written,
-                settings_pruned: children.settings_pruned,
-            },
-        })
+        Ok(result)
     }
+}
+
+pub(crate) fn replace_session_snapshot_on(
+    connection: &Connection,
+    session: &NewSession<'_>,
+    replacement: &SessionSnapshotReplacement<'_>,
+) -> Result<SessionSnapshotReplacementResult> {
+    let session = Sessions::new(connection).upsert(session)?;
+    let session_data = replace_session_data_on(connection, session.id, &replacement.data)?;
+    let children = SessionSnapshots::new(connection).replace(session.id, replacement)?;
+    Ok(SessionSnapshotReplacementResult {
+        session,
+        stats: SessionSnapshotReplacementStats {
+            session_data,
+            slices_written: children.slices_written,
+            slices_pruned: children.slices_pruned,
+            summary_metrics_written: children.summary_metrics_written,
+            summary_metrics_pruned: children.summary_metrics_pruned,
+            settings_written: children.settings_written,
+            settings_pruned: children.settings_pruned,
+        },
+    })
+}
+
+pub(crate) fn replace_session_snapshot_on_with_checkpoint(
+    connection: &Connection,
+    session: &NewSession<'_>,
+    replacement: &SessionSnapshotReplacement<'_>,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<SessionSnapshotReplacementResult> {
+    checkpoint()?;
+    let session = Sessions::new(connection).upsert(session)?;
+    checkpoint()?;
+    let session_data = replace_session_data_on_with_checkpoint(
+        connection,
+        session.id,
+        &replacement.data,
+        checkpoint,
+    )?;
+    checkpoint()?;
+    let children = SessionSnapshots::new(connection).replace_with_checkpoint(
+        session.id,
+        replacement,
+        checkpoint,
+    )?;
+    Ok(SessionSnapshotReplacementResult {
+        session,
+        stats: SessionSnapshotReplacementStats {
+            session_data,
+            slices_written: children.slices_written,
+            slices_pruned: children.slices_pruned,
+            summary_metrics_written: children.summary_metrics_written,
+            summary_metrics_pruned: children.summary_metrics_pruned,
+            settings_written: children.settings_written,
+            settings_pruned: children.settings_pruned,
+        },
+    })
 }
 
 fn replace_session_data_on(
     connection: &Connection,
     session_id: i64,
     replacement: &SessionDataReplacement<'_>,
+) -> Result<SessionReplacementStats> {
+    let mut checkpoint = || Ok(());
+    replace_session_data_on_with_checkpoint(connection, session_id, replacement, &mut checkpoint)
+}
+
+fn replace_session_data_on_with_checkpoint(
+    connection: &Connection,
+    session_id: i64,
+    replacement: &SessionDataReplacement<'_>,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
 ) -> Result<SessionReplacementStats> {
     if Sessions::new(connection).get(session_id)?.is_none() {
         return Err(Error::Integrity(format!(
@@ -92,6 +146,7 @@ fn replace_session_data_on(
         .map(|event| event.source_key)
         .collect::<HashSet<_>>();
     for event in replacement.events {
+        checkpoint()?;
         Events::new(connection).upsert(&NewEvent {
             session_id,
             source_key: event.source_key,
@@ -109,6 +164,7 @@ fn replace_session_data_on(
         .filter(|event| !event_keys.contains(event.source_key.as_str()))
         .collect::<Vec<_>>();
     for event in &stale_events {
+        checkpoint()?;
         Events::new(connection).delete(event.id)?;
     }
 
@@ -120,6 +176,7 @@ fn replace_session_data_on(
         .collect::<HashSet<_>>();
     let mut chunks_written = 0;
     for waveform in replacement.waveforms {
+        checkpoint()?;
         let repository = Waveforms::new(connection);
         if let Some(existing) =
             repository.find_metadata_by_source_key(session_id, waveform.source_key)?
@@ -140,6 +197,7 @@ fn replace_session_data_on(
             created_at_ms: waveform.created_at_ms,
         })?;
         for chunk in waveform.chunks {
+            checkpoint()?;
             repository.upsert_chunk(&NewWaveformChunk {
                 waveform_id: metadata.id,
                 chunk_index: chunk.chunk_index,
@@ -158,6 +216,7 @@ fn replace_session_data_on(
         .filter(|waveform| !waveform_keys.contains(waveform.source_key.as_str()))
         .collect::<Vec<_>>();
     for waveform in &stale_waveforms {
+        checkpoint()?;
         Waveforms::new(connection).delete_metadata(waveform.id)?;
     }
 
@@ -203,7 +262,7 @@ fn validate_replacement(replacement: &SessionDataReplacement<'_>) -> Result<()> 
     Ok(())
 }
 
-fn validate_session_snapshot(
+pub(crate) fn validate_session_snapshot(
     session: &NewSession<'_>,
     replacement: &SessionSnapshotReplacement<'_>,
 ) -> Result<()> {
