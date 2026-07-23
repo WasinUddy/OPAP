@@ -117,6 +117,7 @@ fn legacy_identity_returned(world: &mut ResmedWorld) {
         Some(&MachineInfo {
             brand: "ResMed".to_owned(),
             model: "AirSense 10 AutoSet".to_owned(),
+            source_model: "AirSense_10_AutoSet".to_owned(),
             model_number: LEGACY_MODEL_NUMBER.to_owned(),
             serial: LEGACY_SERIAL.to_owned(),
             series: "AirSense 10".to_owned(),
@@ -131,6 +132,7 @@ fn json_identity_returned(world: &mut ResmedWorld) {
         Some(&MachineInfo {
             brand: "ResMed".to_owned(),
             model: "AirSense11 AutoSet".to_owned(),
+            source_model: "AirSense11 AutoSet".to_owned(),
             model_number: JSON_MODEL_NUMBER.to_owned(),
             serial: JSON_SERIAL.to_owned(),
             series: "AirSense 11".to_owned(),
@@ -302,5 +304,9 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, SnapshotEntry> {
 
 #[tokio::main]
 async fn main() {
-    ResmedWorld::run(format!("{}/features", env!("CARGO_MANIFEST_DIR"))).await;
+    ResmedWorld::run(format!(
+        "{}/features/resmed_identification.feature",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .await;
 }
