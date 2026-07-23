@@ -193,7 +193,7 @@ pub enum SettingValue {
 }
 
 /// Evidence for how a setting value entered the normalized session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ValueOrigin {
     /// The device explicitly reported the value.
@@ -205,13 +205,8 @@ pub enum ValueOrigin {
         algorithm: String,
     },
     /// The value was inferred without a direct device field.
+    #[default]
     Inferred,
-}
-
-impl Default for ValueOrigin {
-    fn default() -> Self {
-        Self::Inferred
-    }
 }
 
 /// One machine or therapy setting active during a session.
@@ -317,7 +312,7 @@ pub struct SessionTimestamp {
 }
 
 /// Completeness of the data carried by a session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionDataKind {
     /// Detailed events or sampled signals were decoded for the session.
@@ -325,13 +320,8 @@ pub enum SessionDataKind {
     /// Only device-reported summary and settings data were available.
     SummaryOnly,
     /// Some expected source data was absent, rejected, or not decoded.
+    #[default]
     Partial,
-}
-
-impl Default for SessionDataKind {
-    fn default() -> Self {
-        Self::Partial
-    }
 }
 
 /// Therapy/equipment state represented by a [`TherapySlice`].
