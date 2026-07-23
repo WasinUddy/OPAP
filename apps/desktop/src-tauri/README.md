@@ -40,3 +40,5 @@ This crate retains a nested `[workspace]` and lockfile so its platform-heavy
 Tauri dependency graph stays isolated from the root Rust workspace. The shared
 `opap-service` crate is a root-workspace member and is consumed here through an
 exact-version path dependency. Dedicated native-host CI validates this boundary.
+The native host's minimum Rust version is 1.88 because its patched plist/XML
+dependency chain requires that release.
