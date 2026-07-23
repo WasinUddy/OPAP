@@ -537,3 +537,41 @@ pub fn resmed_signal(file: ResmedFileKind, label: &str) -> Option<&'static Chann
     let channel = matches.next()?;
     matches.next().is_none().then_some(channel)
 }
+
+/// Resolve a `ResMed` signal or annotation label using OSCAR's permissive
+/// label-starts-with-alias direction and case-insensitive comparison.
+///
+/// File-family scoping remains mandatory. Multiple matching aliases belonging
+/// to one channel count as one match, while labels matching aliases from more
+/// than one channel fail closed and return `None`.
+///
+/// Matching is locale-independent and performs Unicode lowercase comparison
+/// without normalization. This reproduces OSCAR's behavior for the ASCII labels
+/// used by its BRP/EVE paths and gives deterministic casing behavior for the
+/// registry's non-ASCII aliases. It does not claim equivalence with every
+/// version-specific edge case of Qt's Unicode case folding.
+#[must_use]
+pub fn resmed_signal_prefix(
+    file: ResmedFileKind,
+    label: &str,
+) -> Option<&'static ChannelDefinition> {
+    let mut matches = CHANNELS.iter().filter(|channel| {
+        channel.resmed_signals.iter().any(|signal| {
+            signal.file == file
+                && signal
+                    .aliases
+                    .iter()
+                    .any(|alias| starts_with_case_insensitive(label, alias))
+        })
+    });
+    let channel = matches.next()?;
+    matches.next().is_none().then_some(channel)
+}
+
+fn starts_with_case_insensitive(value: &str, prefix: &str) -> bool {
+    let mut value_lowercase = value.chars().flat_map(char::to_lowercase);
+    prefix
+        .chars()
+        .flat_map(char::to_lowercase)
+        .all(|expected| value_lowercase.next() == Some(expected))
+}

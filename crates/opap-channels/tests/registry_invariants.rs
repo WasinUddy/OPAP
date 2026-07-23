@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use opap_channels::{
     CHANNELS, ChannelDto, ChannelKind, LegacyOscarChannelId, ResmedFileKind, Unit, by_legacy_id,
-    by_legacy_numeric_id, by_stable_key, resmed_signal,
+    by_legacy_numeric_id, by_stable_key, resmed_signal, resmed_signal_prefix,
 };
 
 #[test]
@@ -142,6 +142,70 @@ fn lookup_boundaries_are_exact_and_fail_closed() {
     );
     assert_eq!(resmed_signal(ResmedFileKind::Pld, "Leak.2s extra"), None);
     assert_eq!(resmed_signal(ResmedFileKind::Pld, "Flow.40ms"), None);
+}
+
+#[test]
+fn prefix_lookup_matches_oscar_case_and_cropped_alias_policy() {
+    let flow = by_stable_key("pap.series.flow_rate").expect("flow channel");
+    assert_eq!(
+        resmed_signal_prefix(ResmedFileKind::Brp, "fLoW.40MS diagnostic suffix"),
+        Some(flow)
+    );
+
+    let high_rate_pressure =
+        by_stable_key("pap.series.mask_pressure_high_rate").expect("BRP pressure channel");
+    assert_eq!(
+        resmed_signal_prefix(ResmedFileKind::Brp, "MASK PRESSURE waveform"),
+        Some(high_rate_pressure)
+    );
+
+    let obstructive =
+        by_stable_key("pap.event.obstructive_apnea").expect("obstructive event channel");
+    assert_eq!(
+        resmed_signal_prefix(ResmedFileKind::Eve, "OBSTRUCTIVE APNEA (OA)"),
+        Some(obstructive)
+    );
+}
+
+#[test]
+fn prefix_lookup_remains_file_scoped_and_fails_closed() {
+    let high_rate_pressure =
+        by_stable_key("pap.series.mask_pressure_high_rate").expect("BRP pressure channel");
+    let regular_pressure = by_stable_key("pap.series.mask_pressure").expect("PLD pressure channel");
+    assert_eq!(
+        resmed_signal_prefix(ResmedFileKind::Brp, "Mask Pressure samples"),
+        Some(high_rate_pressure)
+    );
+    assert_eq!(
+        resmed_signal_prefix(ResmedFileKind::Pld, "Mask Pressure samples"),
+        Some(regular_pressure)
+    );
+
+    // "TidVol.2s" is both an exact tidal-volume alias and starts with the
+    // inspiratory-time alias "Ti", so an unordered registry lookup must not
+    // reproduce OSCAR's loader-branch precedence implicitly.
+    assert_eq!(resmed_signal_prefix(ResmedFileKind::Pld, "TidVol.2s"), None);
+    assert_eq!(
+        resmed_signal_prefix(ResmedFileKind::Pld, "unknown signal"),
+        None
+    );
+}
+
+#[test]
+fn prefix_lookup_does_not_change_the_exact_resolver() {
+    let flow = by_stable_key("pap.series.flow_rate").expect("flow channel");
+    assert_eq!(resmed_signal(ResmedFileKind::Brp, "Flow.40ms"), Some(flow));
+    assert_eq!(resmed_signal(ResmedFileKind::Brp, "flow.40ms"), None);
+    assert_eq!(
+        resmed_signal(ResmedFileKind::Brp, "Flow.40ms diagnostic suffix"),
+        None
+    );
+
+    let tidal_volume = by_stable_key("pap.series.tidal_volume").expect("tidal-volume channel");
+    assert_eq!(
+        resmed_signal(ResmedFileKind::Pld, "TidVol.2s"),
+        Some(tidal_volume)
+    );
 }
 
 #[test]

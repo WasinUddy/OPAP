@@ -19,7 +19,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Current version of the serialized import report contract.
-pub const IMPORT_SCHEMA_VERSION: u16 = 3;
+pub const IMPORT_SCHEMA_VERSION: u16 = 4;
 
 /// A timestamp expressed as milliseconds since the Unix epoch in UTC.
 pub type UnixMillis = i64;
@@ -103,6 +103,13 @@ pub struct ChannelMetadata {
 /// Regularly sampled values for one channel in one session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WaveformSeries {
+    /// Opaque, importer-derived identity of the source series.
+    ///
+    /// This value must be stable for idempotent re-imports and must not contain
+    /// a filesystem path, patient identifier, or machine serial number. An empty
+    /// value denotes a record produced before schema v4.
+    #[serde(default)]
+    pub source_key: String,
     /// Identifier of the corresponding [`ChannelMetadata`].
     pub channel_id: String,
     /// UTC time of the first sample.
@@ -111,15 +118,52 @@ pub struct WaveformSeries {
     pub sample_interval_ms: f64,
     /// Samples in chronological order, in the channel's declared unit.
     pub samples: Vec<f32>,
+    /// Original EDF calibration and record cadence, when the source was EDF.
+    ///
+    /// Importers must validate that every bound and duration is finite, that
+    /// digital bounds differ, and that the record cadence is non-zero before
+    /// using this metadata to interpret samples.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_encoding: Option<EdfSourceEncoding>,
+}
+
+/// Calibration and cadence copied from one decoded EDF signal.
+///
+/// This metadata preserves enough source context to audit the normalized flat
+/// samples without requiring consumers to reinterpret untrusted EDF headers.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EdfSourceEncoding {
+    /// Smallest digital value declared by the EDF signal.
+    pub digital_minimum: i32,
+    /// Largest digital value declared by the EDF signal.
+    pub digital_maximum: i32,
+    /// Physical value corresponding to the declared digital minimum.
+    pub physical_minimum: f64,
+    /// Physical value corresponding to the declared digital maximum.
+    pub physical_maximum: f64,
+    /// Samples contributed by this signal to each EDF data record.
+    pub samples_per_record: u32,
+    /// Duration of one EDF data record in seconds.
+    pub record_duration_seconds: f64,
 }
 
 /// One discrete event in an [`EventSeries`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
+    /// Opaque, importer-derived identity of the source event.
+    ///
+    /// This must be stable within the session and must not expose source paths
+    /// or device identifiers. Empty denotes a record produced before schema v4.
+    #[serde(default)]
+    pub source_key: String,
     /// UTC time at which the event starts.
     pub start_time_unix_ms: UnixMillis,
-    /// Event duration. Instantaneous events use zero.
-    pub duration_ms: u64,
+    /// Event duration.
+    ///
+    /// `None` means the source did not report a duration. `Some(0)` is distinct
+    /// and represents a source-reported instantaneous event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
     /// Optional event magnitude or manufacturer-provided score.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
@@ -148,6 +192,28 @@ pub enum SettingValue {
     Boolean(bool),
 }
 
+/// Evidence for how a setting value entered the normalized session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ValueOrigin {
+    /// The device explicitly reported the value.
+    DeviceReported,
+    /// The importer calculated the value with a named, versionable algorithm.
+    Derived {
+        /// Stable algorithm identifier. Importers must not use a display label
+        /// or free-form explanation as this identifier.
+        algorithm: String,
+    },
+    /// The value was inferred without a direct device field.
+    Inferred,
+}
+
+impl Default for ValueOrigin {
+    fn default() -> Self {
+        Self::Inferred
+    }
+}
+
 /// One machine or therapy setting active during a session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Setting {
@@ -160,6 +226,12 @@ pub struct Setting {
     pub unit: Option<String>,
     /// Typed setting value.
     pub value: SettingValue,
+    /// Provenance of the normalized value.
+    ///
+    /// Schema-v3 settings deserialize as [`ValueOrigin::Inferred`] so legacy
+    /// values are never retroactively presented as device-reported facts.
+    #[serde(default)]
+    pub origin: ValueOrigin,
 }
 
 /// One numeric value summarized over a session.
@@ -185,6 +257,30 @@ pub struct SessionSummary {
     pub metrics: Vec<SummaryMetric>,
 }
 
+/// Device-local calendar time with no implied UTC offset or timezone.
+///
+/// Importers must validate calendar ranges before constructing normalized
+/// timestamps: month 1–12, a day valid for its month and year, hour 0–23,
+/// minute and second 0–59, and millisecond 0–999. This type deliberately does
+/// not guess daylight-saving rules or interpret local fields as UTC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceLocalDateTime {
+    /// Full calendar year.
+    pub year: u16,
+    /// Calendar month, 1 through 12.
+    pub month: u8,
+    /// Calendar day, validated against the month and year.
+    pub day: u8,
+    /// Hour, 0 through 23.
+    pub hour: u8,
+    /// Minute, 0 through 59.
+    pub minute: u8,
+    /// Second, 0 through 59.
+    pub second: u8,
+    /// Millisecond, 0 through 999.
+    pub millisecond: u16,
+}
+
 /// A session boundary with both normalized and source-clock provenance.
 ///
 /// Keeping the device-local wall time permits timezone rules and clock
@@ -200,11 +296,73 @@ pub struct SessionTimestamp {
     /// Device-local wall time before offset or clock correction, serialized as
     /// an ISO 8601 local date-time without a timezone suffix.
     pub device_local_wall_time: String,
+    /// Structured device-local fields, avoiding reparsing the legacy string.
+    ///
+    /// Schema-v3 records deserialize this as `None`. Importers writing schema v4
+    /// should populate it only after validating the calendar fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_local: Option<DeviceLocalDateTime>,
     /// Signed seconds by which device-local time was ahead of UTC.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub applied_utc_offset_seconds: Option<i32>,
     /// Signed correction added to the device clock before UTC normalization.
     pub device_clock_correction_ms: i64,
+    /// Basis used to select the UTC offset, when known.
+    ///
+    /// Examples include a versioned timezone database rule or an explicitly
+    /// supplied fixed offset. This is provenance, not an instruction to
+    /// renormalize the timestamp. Empty legacy records deserialize as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone_basis: Option<String>,
+}
+
+/// Completeness of the data carried by a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionDataKind {
+    /// Detailed events or sampled signals were decoded for the session.
+    Detailed,
+    /// Only device-reported summary and settings data were available.
+    SummaryOnly,
+    /// Some expected source data was absent, rejected, or not decoded.
+    Partial,
+}
+
+impl Default for SessionDataKind {
+    fn default() -> Self {
+        Self::Partial
+    }
+}
+
+/// Therapy/equipment state represented by a [`TherapySlice`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TherapySliceState {
+    /// The mask was on and therapy usage accrued.
+    MaskOn,
+    /// The mask was off while the source session remained open.
+    MaskOff,
+    /// The device was explicitly reported as off.
+    EquipmentOff,
+}
+
+/// One source-reported state interval within a therapy session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TherapySlice {
+    /// Opaque, importer-derived identity of the source interval.
+    ///
+    /// It must not contain a filesystem path, patient identifier, or serial.
+    #[serde(default)]
+    pub source_key: String,
+    /// State active throughout this half-open interval.
+    pub state: TherapySliceState,
+    /// Inclusive UTC start in milliseconds.
+    pub start_time_unix_ms: UnixMillis,
+    /// Exclusive UTC end in milliseconds.
+    ///
+    /// Importers must reject reversed intervals and overlapping slices rather
+    /// than silently repairing or double-counting therapy usage.
+    pub end_time_unix_ms: UnixMillis,
 }
 
 /// A single contiguous CPAP therapy session.
@@ -212,10 +370,28 @@ pub struct SessionTimestamp {
 pub struct Session {
     /// Stable importer-derived identifier used for idempotent re-imports.
     pub id: String,
+    /// Opaque identity of the complete source session.
+    ///
+    /// It must be stable for equivalent source content and must not expose raw
+    /// source paths or device identifiers. Empty denotes a schema-v3 record.
+    #[serde(default)]
+    pub source_key: String,
+    /// Manufacturer therapy-day bucket, in `YYYY-MM-DD` form when known.
+    ///
+    /// Importers must preserve the source device's day boundary; consumers must
+    /// not reconstruct this value from normalized UTC timestamps.
+    #[serde(default)]
+    pub therapy_day: String,
+    /// Whether the session contains detailed, summary-only, or partial data.
+    #[serde(default)]
+    pub data_kind: SessionDataKind,
     /// Start boundary, inclusive, with device-clock provenance.
     pub start_time: SessionTimestamp,
     /// End boundary, exclusive, with device-clock provenance.
     pub end_time: SessionTimestamp,
+    /// Ordered, non-overlapping therapy/equipment intervals.
+    #[serde(default)]
+    pub slices: Vec<TherapySlice>,
     /// Channel definitions referenced by series in this session.
     pub channels: Vec<ChannelMetadata>,
     /// Regularly sampled signals.
@@ -342,7 +518,7 @@ mod tests {
 
         assert_eq!(decoded, report);
         assert_eq!(decoded.schema_version, IMPORT_SCHEMA_VERSION);
-        assert_eq!(decoded.schema_version, 3);
+        assert_eq!(decoded.schema_version, 4);
         assert_eq!(decoded.device.machine.source_model, "AirSense11 AutoSet");
     }
 
@@ -364,20 +540,226 @@ mod tests {
 
     #[test]
     fn session_timestamp_preserves_normalization_inputs() {
+        let device_local = DeviceLocalDateTime {
+            year: 2026,
+            month: 2,
+            day: 1,
+            hour: 6,
+            minute: 15,
+            second: 0,
+            millisecond: 0,
+        };
         let timestamp = SessionTimestamp {
             normalized_utc_unix_ms: 1_769_917_500_000,
             device_local_wall_time: "2026-02-01T06:15:00.000".to_owned(),
+            device_local: Some(device_local),
             applied_utc_offset_seconds: Some(7 * 60 * 60),
             device_clock_correction_ms: -500,
+            timezone_basis: Some("fixed-offset:+07:00".to_owned()),
         };
 
         let encoded = serde_json::to_value(&timestamp).expect("serialize timestamp");
         assert_eq!(encoded["device_local_wall_time"], "2026-02-01T06:15:00.000");
+        assert_eq!(encoded["device_local"]["year"], 2026);
+        assert_eq!(encoded["device_local"]["month"], 2);
         assert_eq!(encoded["applied_utc_offset_seconds"], 25_200);
         assert_eq!(encoded["device_clock_correction_ms"], -500);
+        assert_eq!(encoded["timezone_basis"], "fixed-offset:+07:00");
         assert_eq!(
             serde_json::from_value::<SessionTimestamp>(encoded).expect("deserialize timestamp"),
             timestamp
+        );
+    }
+
+    #[test]
+    fn event_missing_duration_is_distinct_from_reported_zero_duration() {
+        let missing = Event {
+            source_key: "event-missing-duration".to_owned(),
+            start_time_unix_ms: 1_000,
+            duration_ms: None,
+            value: None,
+        };
+        let zero = Event {
+            source_key: "event-zero-duration".to_owned(),
+            start_time_unix_ms: 2_000,
+            duration_ms: Some(0),
+            value: None,
+        };
+
+        let missing_json = serde_json::to_value(&missing).expect("serialize missing duration");
+        let zero_json = serde_json::to_value(&zero).expect("serialize zero duration");
+        assert!(missing_json.get("duration_ms").is_none());
+        assert_eq!(zero_json["duration_ms"], 0);
+        assert_eq!(
+            serde_json::from_value::<Event>(missing_json).expect("round-trip missing duration"),
+            missing
+        );
+        assert_eq!(
+            serde_json::from_value::<Event>(zero_json).expect("round-trip zero duration"),
+            zero
+        );
+
+        let legacy_missing: Event = serde_json::from_value(json!({
+            "start_time_unix_ms": 3_000,
+            "value": null
+        }))
+        .expect("read event without schema-v4 fields");
+        assert!(legacy_missing.source_key.is_empty());
+        assert_eq!(legacy_missing.duration_ms, None);
+    }
+
+    #[test]
+    fn schema_v3_session_defaults_new_schema_v4_fields_conservatively() {
+        let legacy = json!({
+            "id": "legacy-session",
+            "start_time": {
+                "normalized_utc_unix_ms": 1_000,
+                "device_local_wall_time": "2026-01-01T12:00:00.000",
+                "applied_utc_offset_seconds": 0,
+                "device_clock_correction_ms": 0
+            },
+            "end_time": {
+                "normalized_utc_unix_ms": 2_000,
+                "device_local_wall_time": "2026-01-01T12:00:01.000",
+                "applied_utc_offset_seconds": 0,
+                "device_clock_correction_ms": 0
+            },
+            "channels": [],
+            "waveforms": [{
+                "channel_id": "pap.series.flow_rate",
+                "start_time_unix_ms": 1_000,
+                "sample_interval_ms": 40.0,
+                "samples": [1.0, 2.0]
+            }],
+            "event_series": [{
+                "channel_id": "pap.event.hypopnea",
+                "events": [{
+                    "start_time_unix_ms": 1_500,
+                    "duration_ms": 0,
+                    "value": null
+                }]
+            }],
+            "settings": [{
+                "key": "pap.setting.mode",
+                "label": "Mode",
+                "value": {"type": "text", "value": "APAP"}
+            }],
+            "summary": {
+                "usage_ms": 1_000,
+                "metrics": []
+            }
+        });
+
+        let decoded: Session =
+            serde_json::from_value(legacy).expect("deserialize schema-v3 session");
+
+        assert!(decoded.source_key.is_empty());
+        assert!(decoded.therapy_day.is_empty());
+        assert_eq!(decoded.data_kind, SessionDataKind::Partial);
+        assert!(decoded.slices.is_empty());
+        assert!(decoded.start_time.device_local.is_none());
+        assert!(decoded.start_time.timezone_basis.is_none());
+        assert!(decoded.waveforms[0].source_key.is_empty());
+        assert!(decoded.waveforms[0].source_encoding.is_none());
+        assert!(decoded.event_series[0].events[0].source_key.is_empty());
+        assert_eq!(decoded.event_series[0].events[0].duration_ms, Some(0));
+        assert_eq!(decoded.settings[0].origin, ValueOrigin::Inferred);
+    }
+
+    #[test]
+    fn schema_v4_session_round_trips_source_and_provenance_metadata() {
+        let local_start = DeviceLocalDateTime {
+            year: 2026,
+            month: 1,
+            day: 1,
+            hour: 22,
+            minute: 0,
+            second: 0,
+            millisecond: 0,
+        };
+        let start = SessionTimestamp {
+            normalized_utc_unix_ms: 1_767_282_400_000,
+            device_local_wall_time: "2026-01-01T22:00:00.000".to_owned(),
+            device_local: Some(local_start),
+            applied_utc_offset_seconds: Some(0),
+            device_clock_correction_ms: 0,
+            timezone_basis: Some("fixture:utc".to_owned()),
+        };
+        let end = SessionTimestamp {
+            normalized_utc_unix_ms: 1_767_282_401_000,
+            device_local_wall_time: "2026-01-01T22:00:01.000".to_owned(),
+            device_local: Some(DeviceLocalDateTime {
+                second: 1,
+                ..local_start
+            }),
+            applied_utc_offset_seconds: Some(0),
+            device_clock_correction_ms: 0,
+            timezone_basis: Some("fixture:utc".to_owned()),
+        };
+        let session = Session {
+            id: "session-20260101-220000".to_owned(),
+            source_key: "session-source-01".to_owned(),
+            therapy_day: "2026-01-01".to_owned(),
+            data_kind: SessionDataKind::Detailed,
+            start_time: start,
+            end_time: end,
+            slices: vec![TherapySlice {
+                source_key: "slice-source-01".to_owned(),
+                state: TherapySliceState::MaskOn,
+                start_time_unix_ms: 1_767_282_400_000,
+                end_time_unix_ms: 1_767_282_401_000,
+            }],
+            channels: Vec::new(),
+            waveforms: vec![WaveformSeries {
+                source_key: "waveform-source-01".to_owned(),
+                channel_id: "pap.series.flow_rate".to_owned(),
+                start_time_unix_ms: 1_767_282_400_000,
+                sample_interval_ms: 40.0,
+                samples: vec![1.25, -0.5],
+                source_encoding: Some(EdfSourceEncoding {
+                    digital_minimum: -32_768,
+                    digital_maximum: 32_767,
+                    physical_minimum: -120.0,
+                    physical_maximum: 120.0,
+                    samples_per_record: 25,
+                    record_duration_seconds: 1.0,
+                }),
+            }],
+            event_series: vec![EventSeries {
+                channel_id: "pap.event.hypopnea".to_owned(),
+                events: vec![Event {
+                    source_key: "event-source-01".to_owned(),
+                    start_time_unix_ms: 1_767_282_400_500,
+                    duration_ms: None,
+                    value: None,
+                }],
+            }],
+            settings: vec![Setting {
+                key: "pap.setting.mode".to_owned(),
+                label: "Mode".to_owned(),
+                unit: None,
+                value: SettingValue::Text("APAP".to_owned()),
+                origin: ValueOrigin::Derived {
+                    algorithm: "fixture-mode-v1".to_owned(),
+                },
+            }],
+            summary: SessionSummary {
+                usage_ms: 1_000,
+                metrics: Vec::new(),
+            },
+        };
+
+        let encoded = serde_json::to_value(&session).expect("serialize schema-v4 session");
+        assert_eq!(encoded["data_kind"], "detailed");
+        assert_eq!(encoded["slices"][0]["state"], "mask_on");
+        assert_eq!(encoded["settings"][0]["origin"]["type"], "derived");
+        assert_eq!(
+            encoded["settings"][0]["origin"]["algorithm"],
+            "fixture-mode-v1"
+        );
+        assert_eq!(
+            serde_json::from_value::<Session>(encoded).expect("deserialize schema-v4 session"),
+            session
         );
     }
 }

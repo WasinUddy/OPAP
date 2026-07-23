@@ -38,4 +38,7 @@ pub use model::{
     EventTimestamp, LegacyOscarChannelId, LegacyOscarMetadata, LegacyOscarMetadataDto,
     ResmedFileKind, ResmedSignalDescriptor, ResmedSignalDto, StableChannelKey, Unit,
 };
-pub use registry::{CHANNELS, by_legacy_id, by_legacy_numeric_id, by_stable_key, resmed_signal};
+pub use registry::{
+    CHANNELS, by_legacy_id, by_legacy_numeric_id, by_stable_key, resmed_signal,
+    resmed_signal_prefix,
+};

@@ -40,14 +40,20 @@ The registry includes only:
   that match OPAP's current analytics inputs.
 
 The stored ResMed alias list transcribes the relevant rows from the pinned
-translation table. `resmed_signal` is intentionally stricter than OSCAR's
-loader matcher. OSCAR uses case-insensitive prefix matching; OPAP's canonical
+translation table. `resmed_signal` is intentionally strict: the canonical
 metadata lookup requires an exact, case-sensitive alias and fails closed if a
-mapping is ambiguous.
+mapping is ambiguous. Importer boundaries can use `resmed_signal_prefix` for
+OSCAR's label-starts-with-alias direction and case-insensitive comparison. That
+resolver also fails closed when aliases from multiple channels match.
 File-family scope is part of an alias identity: for example, `Mask Pres` means
 the high-rate mask-pressure channel in BRP and the regular mask-pressure channel
-in PLD. Importers that need legacy permissiveness must implement and test that
-policy at their boundary rather than silently broadening this registry API.
+in PLD.
+
+The permissive resolver is locale-independent. It compares the Unicode
+lowercase forms of characters without normalization. This matches the pinned
+OSCAR behavior for the ASCII BRP/EVE labels while remaining deterministic for
+non-ASCII aliases; exact equivalence with every Qt Unicode case-folding edge
+case is not claimed.
 
 `Unit::EventsPerHour` is the aggregate/display unit for event channels. An
 individual EVE event carries the EDF annotation duration in seconds when one is

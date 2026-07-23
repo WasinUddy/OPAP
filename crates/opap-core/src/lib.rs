@@ -11,9 +11,10 @@ pub mod importer;
 pub mod resmed;
 
 pub use domain::{
-    ChannelKind, ChannelMetadata, DeviceInfo, Event, EventSeries, IMPORT_SCHEMA_VERSION,
-    ImportReport, ImportStatistics, ImportWarning, MachineInfo, Session, SessionSummary,
-    SessionTimestamp, Setting, SettingValue, SummaryMetric, UnixMillis, WarningSeverity,
+    ChannelKind, ChannelMetadata, DeviceInfo, DeviceLocalDateTime, EdfSourceEncoding, Event,
+    EventSeries, IMPORT_SCHEMA_VERSION, ImportReport, ImportStatistics, ImportWarning, MachineInfo,
+    Session, SessionDataKind, SessionSummary, SessionTimestamp, Setting, SettingValue,
+    SummaryMetric, TherapySlice, TherapySliceState, UnixMillis, ValueOrigin, WarningSeverity,
     WaveformSeries,
 };
 #[cfg(all(feature = "native-fs", not(target_family = "wasm")))]
