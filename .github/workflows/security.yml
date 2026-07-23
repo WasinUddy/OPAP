@@ -44,10 +44,18 @@ jobs:
         include:
           - name: core workspace
             manifest: Cargo.toml
+            arguments: --all-features --locked
           - name: Cucumber acceptance
             manifest: tests/acceptance/Cargo.toml
+            arguments: --all-features --locked
+          - name: OSCAR compatibility harness
+            manifest: compat/Cargo.toml
+            arguments: --all-features --locked
           - name: desktop native host
             manifest: apps/desktop/src-tauri/Cargo.toml
+            # The shipped host is macOS-only today. Filtering prevents Linux-only
+            # GTK3/unic/proc-macro maintenance notices from masking real findings.
+            arguments: --all-features --locked --target x86_64-apple-darwin
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -59,7 +67,7 @@ jobs:
         with:
           rust-version: stable
           manifest-path: ${{ matrix.manifest }}
-          arguments: --all-features
+          arguments: ${{ matrix.arguments }}
           command: check
           command-arguments: --config .github/deny.toml
 

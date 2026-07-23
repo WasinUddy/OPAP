@@ -107,6 +107,38 @@ jobs:
           cargo check -p opap-edf --target wasm32-unknown-unknown --no-default-features --locked
           cargo clippy -p opap-edf --target wasm32-unknown-unknown --no-default-features --locked -- -D warnings
 
+  oscar-compat:
+    name: OSCAR compatibility harness
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Restore compatibility-harness cache
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          shared-key: oscar-compat
+          workspaces: compat -> target
+
+      - name: Check compatibility-harness formatting
+        run: cargo fmt --manifest-path compat/Cargo.toml -- --check
+
+      - name: Run compatibility CLI and schema tests
+        run: cargo test --manifest-path compat/Cargo.toml --locked --all-targets
+
+      - name: Lint compatibility harness
+        run: >-
+          cargo clippy --manifest-path compat/Cargo.toml
+          --locked --all-targets --all-features -- -D warnings
+
   cucumber:
     name: Cucumber acceptance tests
     runs-on: ubuntu-24.04
@@ -296,7 +328,7 @@ jobs:
 
   rust-build:
     name: Build Rust release artifact
-    needs: [rust-format, rust-clippy, rust-test, rust-wasm, cucumber]
+    needs: [rust-format, rust-clippy, rust-test, rust-wasm, oscar-compat, cucumber]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:

@@ -61,6 +61,21 @@ updates:
       desktop-native-minor-and-patch:
         update-types: [minor, patch]
 
+  - package-ecosystem: cargo
+    directory: /compat
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:09"
+      timezone: Asia/Bangkok
+    open-pull-requests-limit: 3
+    rebase-strategy: auto
+    commit-message:
+      prefix: deps(compat)
+    groups:
+      compat-minor-and-patch:
+        update-types: [minor, patch]
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
