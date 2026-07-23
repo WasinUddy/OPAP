@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 pub use error::{Error, ErrorCategory, Result};
 pub use migrations::{APPLICATION_ID, LATEST_SCHEMA_VERSION, MigrationRecord};
 pub use model::*;
-use repository::{Events, Imports, Machines, Profiles, Sessions, Waveforms};
+use repository::{Events, Imports, Machines, Profiles, SessionSnapshots, Sessions, Waveforms};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 
 /// An initialized OPAP SQLite database.
@@ -81,6 +81,10 @@ impl Database {
 
     pub fn sessions(&self) -> Sessions<'_> {
         Sessions::new(&self.connection)
+    }
+
+    pub fn session_snapshots(&self) -> SessionSnapshots<'_> {
+        SessionSnapshots::new(&self.connection)
     }
 
     pub fn events(&self) -> Events<'_> {

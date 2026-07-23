@@ -2,7 +2,7 @@ use crate::{Error, Result};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 pub const APPLICATION_ID: i32 = i32::from_be_bytes(*b"OPAP");
-pub const LATEST_SCHEMA_VERSION: i64 = 7;
+pub const LATEST_SCHEMA_VERSION: i64 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationRecord {
@@ -52,6 +52,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 7,
         name: "opaque_import_keys",
         sql: include_str!("../migrations/0007_opaque_import_keys.sql"),
+    },
+    Migration {
+        version: 8,
+        name: "session_snapshots",
+        sql: include_str!("../migrations/0008_session_snapshots.sql"),
     },
 ];
 
@@ -183,6 +188,31 @@ fn validate_schema_fingerprint(connection: &Connection) -> Result<()> {
              completed_at_ms, sessions_created, sessions_updated, events_written, \
              waveform_chunks_written, error_message FROM import_history LIMIT 0",
         ),
+        (
+            "session_provenance",
+            "SELECT session_id, therapy_day, start_local_wall, end_local_wall, \
+             start_utc_offset_seconds, end_utc_offset_seconds, start_clock_correction_ms, \
+             end_clock_correction_ms, data_kind, importer_name, importer_schema, id_algorithm, \
+             source_digest, content_digest FROM session_provenance LIMIT 0",
+        ),
+        (
+            "session_slices",
+            "SELECT session_id, sequence, source_key, state, started_at_ms, ended_at_ms \
+             FROM session_slices LIMIT 0",
+        ),
+        (
+            "session_summary",
+            "SELECT session_id, usage_ms FROM session_summary LIMIT 0",
+        ),
+        (
+            "summary_metrics",
+            "SELECT session_id, metric_key, value, unit FROM summary_metrics LIMIT 0",
+        ),
+        (
+            "session_settings",
+            "SELECT session_id, setting_key, value_kind, integer_value, real_value, \
+             text_value, boolean_value, unit, origin FROM session_settings LIMIT 0",
+        ),
     ];
     const INDEXES: &[(&str, &str)] = &[
         (
@@ -204,6 +234,10 @@ fn validate_schema_fingerprint(connection: &Connection) -> Result<()> {
         (
             "imports_by_logical_key",
             "onimport_history(profile_id,import_key,attemptdesc)",
+        ),
+        (
+            "session_slices_by_time",
+            "onsession_slices(session_id,started_at_ms,sequence)",
         ),
     ];
     const TRIGGERS: &[&str] = &[
@@ -298,6 +332,11 @@ fn validate_schema_fingerprint(connection: &Connection) -> Result<()> {
         ("waveforms", 1),
         ("waveform_chunks", 1),
         ("import_history", 3),
+        ("session_provenance", 1),
+        ("session_slices", 1),
+        ("session_summary", 1),
+        ("summary_metrics", 1),
+        ("session_settings", 1),
     ] {
         let sql = format!("SELECT COUNT(*) FROM pragma_foreign_key_list('{table}')");
         let count: i64 = connection.query_row(&sql, [], |row| row.get(0))?;
@@ -321,6 +360,42 @@ fn validate_schema_fingerprint(connection: &Connection) -> Result<()> {
         return Err(Error::InvalidSchemaFingerprint(
             "stale import_history_v6 table remains".to_owned(),
         ));
+    }
+
+    let provenance_sql = compact_schema_sql(&require_schema_object(
+        connection,
+        "table",
+        "session_provenance",
+    )?);
+    for required in [
+        "source_digesttextnotnullcheck(length(cast(source_digestasblob))=64",
+        "content_digesttextnotnullcheck(length(cast(content_digestasblob))=64",
+        "data_kindin('detailed','summary_only','partial')",
+    ] {
+        if !provenance_sql.contains(required) {
+            return Err(Error::InvalidSchemaFingerprint(
+                "session provenance constraints are incomplete".to_owned(),
+            ));
+        }
+    }
+
+    let settings_sql = compact_schema_sql(&require_schema_object(
+        connection,
+        "table",
+        "session_settings",
+    )?);
+    for required in [
+        "value_kindin('integer','real','text','boolean')",
+        "value_kind='integer'andinteger_valueisnotnull",
+        "value_kind='real'andinteger_valueisnullandreal_valueisnotnull",
+        "value_kind='text'andinteger_valueisnullandreal_valueisnullandtext_valueisnotnull",
+        "value_kind='boolean'andinteger_valueisnullandreal_valueisnullandtext_valueisnullandboolean_valueisnotnull",
+    ] {
+        if !settings_sql.contains(required) {
+            return Err(Error::InvalidSchemaFingerprint(
+                "session setting typed-value constraints are incomplete".to_owned(),
+            ));
+        }
     }
     Ok(())
 }

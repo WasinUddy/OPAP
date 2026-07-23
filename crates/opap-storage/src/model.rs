@@ -391,3 +391,217 @@ pub struct SessionReplacementResult {
     pub session: Session,
     pub stats: SessionReplacementStats,
 }
+
+/// Completeness of the source data represented by a persisted session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionDataKind {
+    Detailed,
+    SummaryOnly,
+    Partial,
+}
+
+impl SessionDataKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Detailed => "detailed",
+            Self::SummaryOnly => "summary_only",
+            Self::Partial => "partial",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "detailed" => Some(Self::Detailed),
+            "summary_only" => Some(Self::SummaryOnly),
+            "partial" => Some(Self::Partial),
+            _ => None,
+        }
+    }
+}
+
+/// Source-clock and importer provenance retained for a complete session
+/// snapshot. Digests are opaque lowercase SHA-256 values; raw paths, serial
+/// numbers, and patient identifiers must never be used in their place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionProvenance {
+    pub session_id: i64,
+    pub therapy_day: String,
+    pub start_local_wall: String,
+    pub end_local_wall: String,
+    pub start_utc_offset_seconds: Option<i32>,
+    pub end_utc_offset_seconds: Option<i32>,
+    pub start_clock_correction_ms: i64,
+    pub end_clock_correction_ms: i64,
+    pub data_kind: SessionDataKind,
+    pub importer_name: String,
+    pub importer_schema: String,
+    pub id_algorithm: String,
+    pub source_digest: String,
+    pub content_digest: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SessionProvenanceInput<'a> {
+    /// Manufacturer/source therapy-day bucket in `YYYY-MM-DD` form.
+    pub therapy_day: &'a str,
+    /// Source-local wall timestamps in exact `YYYY-MM-DDTHH:MM:SS.mmm` form.
+    pub start_local_wall: &'a str,
+    pub end_local_wall: &'a str,
+    /// Signed seconds by which source-local time is ahead of UTC.
+    pub start_utc_offset_seconds: Option<i32>,
+    pub end_utc_offset_seconds: Option<i32>,
+    /// Signed corrections added to the source clock during normalization.
+    pub start_clock_correction_ms: i64,
+    pub end_clock_correction_ms: i64,
+    pub data_kind: SessionDataKind,
+    pub importer_name: &'a str,
+    pub importer_schema: &'a str,
+    pub id_algorithm: &'a str,
+    pub source_digest: &'a str,
+    pub content_digest: &'a str,
+}
+
+/// Therapy/equipment state represented by a stored session slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionSliceState {
+    MaskOn,
+    MaskOff,
+    EquipmentOff,
+}
+
+impl SessionSliceState {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::MaskOn => "mask_on",
+            Self::MaskOff => "mask_off",
+            Self::EquipmentOff => "equipment_off",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "mask_on" => Some(Self::MaskOn),
+            "mask_off" => Some(Self::MaskOff),
+            "equipment_off" => Some(Self::EquipmentOff),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSlice {
+    pub session_id: i64,
+    pub sequence: i64,
+    pub source_key: String,
+    pub state: SessionSliceState,
+    pub started_at_ms: i64,
+    pub ended_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SessionSliceInput<'a> {
+    /// Zero-based source order. Snapshot replacement requires contiguous values.
+    pub sequence: i64,
+    /// Stable opaque importer-derived interval identity.
+    pub source_key: &'a str,
+    pub state: SessionSliceState,
+    pub started_at_ms: i64,
+    pub ended_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SummaryMetric {
+    pub session_id: i64,
+    pub key: String,
+    pub value: f64,
+    pub unit: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SummaryMetricInput<'a> {
+    pub key: &'a str,
+    pub value: f64,
+    pub unit: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionSummary {
+    pub session_id: i64,
+    pub usage_ms: i64,
+    pub metrics: Vec<SummaryMetric>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SessionSummaryInput<'a> {
+    pub usage_ms: i64,
+    pub metrics: &'a [SummaryMetricInput<'a>],
+}
+
+/// Typed value recovered from a `session_settings` row.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SessionSettingValue {
+    Integer(i64),
+    Real(f64),
+    Text(String),
+    Boolean(bool),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionSetting {
+    pub session_id: i64,
+    pub key: String,
+    pub value: SessionSettingValue,
+    pub unit: Option<String>,
+    pub origin: String,
+}
+
+/// Relational setting input. Exactly one value field must be populated. Keeping
+/// the representation explicit lets storage reject malformed adapter output
+/// before opening a transaction.
+#[derive(Debug, Clone, Copy)]
+pub struct SessionSettingInput<'a> {
+    pub key: &'a str,
+    pub integer_value: Option<i64>,
+    pub real_value: Option<f64>,
+    pub text_value: Option<&'a str>,
+    pub boolean_value: Option<bool>,
+    pub unit: Option<&'a str>,
+    pub origin: &'a str,
+}
+
+/// New v8 children that accompany the authoritative event/waveform data for a
+/// session. All slices, metrics, and settings omitted here are pruned.
+#[derive(Debug, Clone, Copy)]
+pub struct SessionSnapshotReplacement<'a> {
+    pub data: SessionDataReplacement<'a>,
+    pub provenance: SessionProvenanceInput<'a>,
+    pub slices: &'a [SessionSliceInput<'a>],
+    pub summary: SessionSummaryInput<'a>,
+    pub settings: &'a [SessionSettingInput<'a>],
+}
+
+/// Complete v8 child state read from storage.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionSnapshot {
+    pub provenance: SessionProvenance,
+    pub slices: Vec<SessionSlice>,
+    pub summary: SessionSummary,
+    pub settings: Vec<SessionSetting>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionSnapshotReplacementStats {
+    pub session_data: SessionReplacementStats,
+    pub slices_written: usize,
+    pub slices_pruned: usize,
+    pub summary_metrics_written: usize,
+    pub summary_metrics_pruned: usize,
+    pub settings_written: usize,
+    pub settings_pruned: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionSnapshotReplacementResult {
+    pub session: Session,
+    pub stats: SessionSnapshotReplacementStats,
+}

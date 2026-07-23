@@ -88,6 +88,11 @@ fn database_at_schema_version(
             "import_history_link_integrity",
             include_str!("../migrations/0006_import_history_link_integrity.sql"),
         ),
+        (
+            7_i64,
+            "opaque_import_keys",
+            include_str!("../migrations/0007_opaque_import_keys.sql"),
+        ),
     ];
     for (migration_version, name, sql) in migrations.into_iter().take(version) {
         connection.execute_batch(sql)?;
@@ -212,6 +217,7 @@ fn migrates_new_database_and_reopening_is_a_noop() -> TestResult {
             (5, "opaque_import_sources"),
             (6, "import_history_link_integrity"),
             (7, "opaque_import_keys"),
+            (8, "session_snapshots"),
         ]
     );
     assert!(migrations.iter().all(|item| item.applied_at_ms > 0));
@@ -238,7 +244,7 @@ fn migrates_new_database_and_reopening_is_a_noop() -> TestResult {
 
     let reopened = Database::open(directory.path().join("opap.sqlite3"))?;
     assert_eq!(reopened.schema_version()?, LATEST_SCHEMA_VERSION);
-    assert_eq!(reopened.applied_migrations()?.len(), 7);
+    assert_eq!(reopened.applied_migrations()?.len(), 8);
     Ok(())
 }
 
@@ -1925,6 +1931,11 @@ fn v5_redacts_terminal_paths_from_early_v4_databases_before_reprotecting_them() 
          BEGIN
              SELECT RAISE(ABORT, 'terminal import job cannot be changed');
          END;
+         DROP TABLE session_settings;
+         DROP TABLE summary_metrics;
+         DROP TABLE session_summary;
+         DROP TABLE session_slices;
+         DROP TABLE session_provenance;
          DELETE FROM schema_migrations WHERE version >= 5;
          PRAGMA user_version = 4;",
     )?;
@@ -1996,15 +2007,15 @@ fn rejects_disagreement_between_user_version_and_migration_history() -> TestResu
     for (case_name, tamper_sql, expected_user, expected_history) in [
         (
             "stale-user-version",
-            "PRAGMA user_version = 6;",
-            6_i64,
+            "PRAGMA user_version = 7;",
             7_i64,
+            8_i64,
         ),
         (
             "missing-history-row",
-            "DELETE FROM schema_migrations WHERE version = 7;",
+            "DELETE FROM schema_migrations WHERE version = 8;",
+            8_i64,
             7_i64,
-            6_i64,
         ),
     ] {
         let directory = tempfile::tempdir()?;

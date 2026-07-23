@@ -12,6 +12,34 @@ authoritative re-import path: it writes session metadata and derived data
 together, validates complete waveform coverage, and atomically prunes events,
 waveforms, and chunks that disappeared from a newly parsed session.
 
+Schema v8 adds the durable session-snapshot foundation used by the Rust port:
+
+- `session_provenance` preserves the manufacturer therapy day, exact local wall
+  boundaries, endpoint UTC offsets and clock corrections, data completeness,
+  versioned importer/schema/session-ID algorithms, and opaque source/content
+  SHA-256 digests.
+- `session_slices` stores ordered, non-overlapping mask-on, mask-off, and
+  equipment-off intervals.
+- `session_summary` stores exactly one usage value per snapshot, with keyed
+  finite numeric values in `summary_metrics`.
+- `session_settings` stores exactly one integer, real, text, or boolean value
+  per key together with its unit and origin.
+
+`Database::replace_session_snapshot` is the v8 authoritative write API. Before
+opening its immediate transaction it rejects non-finite numbers, duplicate
+keys or sequences, non-contiguous waveform chunks, invalid session/slice
+bounds, overlapping slices, excessive usage, malformed local-time provenance,
+and settings with zero or multiple typed values. It then upserts the legacy
+`sessions` row and replaces events, waveforms/chunks, and every v8 child as one
+atomic unit. A database error leaves the prior session and snapshot unchanged.
+`Database::replace_session` remains available for callers that have not yet
+adopted snapshot storage. Read complete v8 children through
+`Database::session_snapshots`.
+
+This migration intentionally does not mark import jobs complete and does not
+add waveform provenance or waveform-segment tables. Those require importer and
+service integration in later porting stages.
+
 Import jobs persist explicit `blocked`, `running`, `completed`, `failed`, and
 `cancelled` states. Interrupted running jobs recover to blocked, while retries
 create time-ordered linked attempts so terminal history is never rewritten.

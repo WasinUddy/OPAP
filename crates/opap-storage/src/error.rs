@@ -191,8 +191,8 @@ mod tests {
     #[test]
     fn categories_are_safe_and_domain_specific() {
         let schema = Error::SchemaTooNew {
-            found: 8,
-            supported: 7,
+            found: 9,
+            supported: 8,
         };
         assert_eq!(schema.category(), ErrorCategory::Schema);
         assert_eq!(schema.category().as_str(), "schema");
