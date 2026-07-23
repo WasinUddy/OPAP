@@ -3,9 +3,11 @@ use opap_storage::{
     APPLICATION_ID, Database, Error as StorageError, ImportCounts, ImportStatus,
     InitialImportStatus, LATEST_SCHEMA_VERSION, NewEvent, NewImport, NewMachine, NewProfile,
     NewSession, NewWaveformChunk, NewWaveformMetadata, RetryImport, SessionDataReplacement,
-    SessionEventInput, SessionWaveformChunkInput, SessionWaveformInput,
+    SessionEventInput, SessionWaveformChunkInput, SessionWaveformInput, is_canonical_request_id,
+    is_legacy_request_id, is_persistable_import_key,
 };
 use std::error::Error;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -14,6 +16,12 @@ const SOURCE_ONE: &str = "opap-source:00000000000000000000000000000001";
 const SOURCE_TWO: &str = "opap-source:00000000000000000000000000000002";
 const SOURCE_THREE: &str = "opap-source:00000000000000000000000000000003";
 const SOURCE_FOUR: &str = "opap-source:00000000000000000000000000000004";
+const REQUEST_ONE: &str = "opap-request:00000000000000000000000000000001";
+const REQUEST_TWO: &str = "opap-request:00000000000000000000000000000002";
+const REQUEST_THREE: &str = "opap-request:00000000000000000000000000000003";
+const REQUEST_FOUR: &str = "opap-request:00000000000000000000000000000004";
+const REQUEST_FIVE: &str = "opap-request:00000000000000000000000000000005";
+const REQUEST_SIX: &str = "opap-request:00000000000000000000000000000006";
 
 struct FixtureIds {
     profile: i64,
@@ -28,6 +36,70 @@ fn temporary_database() -> Result<(TempDir, Database), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
     let database = Database::open(directory.path().join("opap.sqlite3"))?;
     Ok((directory, database))
+}
+
+fn sqlite_wal_path(path: &Path) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push("-wal");
+    value.into()
+}
+
+fn database_at_schema_version(
+    path: &Path,
+    version: usize,
+) -> Result<rusqlite::Connection, Box<dyn Error>> {
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         CREATE TABLE schema_migrations (
+             version INTEGER PRIMARY KEY,
+             name TEXT NOT NULL,
+             applied_at_ms INTEGER NOT NULL
+         ) STRICT;",
+    )?;
+    let migrations = [
+        (
+            1_i64,
+            "initial_storage",
+            include_str!("../migrations/0001_initial_storage.sql"),
+        ),
+        (
+            2_i64,
+            "query_indexes",
+            include_str!("../migrations/0002_query_indexes.sql"),
+        ),
+        (
+            3_i64,
+            "storage_integrity",
+            include_str!("../migrations/0003_storage_integrity.sql"),
+        ),
+        (
+            4_i64,
+            "import_job_states",
+            include_str!("../migrations/0004_import_job_states.sql"),
+        ),
+        (
+            5_i64,
+            "opaque_import_sources",
+            include_str!("../migrations/0005_opaque_import_sources.sql"),
+        ),
+        (
+            6_i64,
+            "import_history_link_integrity",
+            include_str!("../migrations/0006_import_history_link_integrity.sql"),
+        ),
+    ];
+    for (migration_version, name, sql) in migrations.into_iter().take(version) {
+        connection.execute_batch(sql)?;
+        connection.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at_ms)
+             VALUES (?1, ?2, ?1)",
+            rusqlite::params![migration_version, name],
+        )?;
+    }
+    connection.pragma_update(None, "application_id", APPLICATION_ID)?;
+    connection.pragma_update(None, "user_version", version as i64)?;
+    Ok(connection)
 }
 
 fn seed_database(database: &mut Database) -> Result<FixtureIds, Box<dyn Error>> {
@@ -90,7 +162,7 @@ fn seed_database(database: &mut Database) -> Result<FixtureIds, Box<dyn Error>> 
     let started = Imports::new(&transaction).begin_or_get(&NewImport {
         profile_id: profile.id,
         machine_id: Some(machine.id),
-        import_key: "sha256:fixture-card-v1",
+        import_key: REQUEST_ONE,
         source_uri: SOURCE_ONE,
         loader_name: "resmed",
         initial_status: InitialImportStatus::Running,
@@ -139,6 +211,7 @@ fn migrates_new_database_and_reopening_is_a_noop() -> TestResult {
             (4, "import_job_states"),
             (5, "opaque_import_sources"),
             (6, "import_history_link_integrity"),
+            (7, "opaque_import_keys"),
         ]
     );
     assert!(migrations.iter().all(|item| item.applied_at_ms > 0));
@@ -147,6 +220,11 @@ fn migrates_new_database_and_reopening_is_a_noop() -> TestResult {
         .connection()
         .query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
     assert_eq!(foreign_keys, 1);
+    let secure_delete: i64 =
+        database
+            .connection()
+            .query_row("PRAGMA secure_delete", [], |row| row.get(0))?;
+    assert_eq!(secure_delete, 1);
     let application_id: i64 =
         database
             .connection()
@@ -160,7 +238,7 @@ fn migrates_new_database_and_reopening_is_a_noop() -> TestResult {
 
     let reopened = Database::open(directory.path().join("opap.sqlite3"))?;
     assert_eq!(reopened.schema_version()?, LATEST_SCHEMA_VERSION);
-    assert_eq!(reopened.applied_migrations()?.len(), 6);
+    assert_eq!(reopened.applied_migrations()?.len(), 7);
     Ok(())
 }
 
@@ -265,7 +343,7 @@ fn reimport_upserts_are_idempotent() -> TestResult {
     let repeated_import = database.imports().begin_or_get(&NewImport {
         profile_id: ids.profile,
         machine_id: Some(ids.machine),
-        import_key: "sha256:fixture-card-v1",
+        import_key: REQUEST_ONE,
         source_uri: SOURCE_ONE,
         loader_name: "resmed",
         initial_status: InitialImportStatus::Running,
@@ -630,7 +708,7 @@ fn import_machine_must_belong_to_the_same_profile() -> TestResult {
     let result = database.imports().begin_or_get(&NewImport {
         profile_id: other.id,
         machine_id: Some(ids.machine),
-        import_key: "cross-profile",
+        import_key: REQUEST_TWO,
         source_uri: SOURCE_TWO,
         loader_name: "resmed",
         initial_status: InitialImportStatus::Blocked,
@@ -641,7 +719,7 @@ fn import_machine_must_belong_to_the_same_profile() -> TestResult {
     assert!(
         database
             .imports()
-            .find_by_key(other.id, "cross-profile")?
+            .find_by_key(other.id, REQUEST_TWO)?
             .is_none()
     );
     Ok(())
@@ -757,7 +835,7 @@ fn blocked_jobs_start_and_cancel_through_guarded_transitions() -> TestResult {
     let request = NewImport {
         profile_id: ids.profile,
         machine_id: Some(ids.machine),
-        import_key: "blocked-job",
+        import_key: REQUEST_THREE,
         source_uri: SOURCE_THREE,
         loader_name: "resmed",
         initial_status: InitialImportStatus::Blocked,
@@ -852,10 +930,10 @@ fn blocked_jobs_start_and_cancel_through_guarded_transitions() -> TestResult {
 }
 
 #[test]
-fn fresh_databases_accept_only_canonical_or_controlled_legacy_source_ids() -> TestResult {
-    let (_directory, database) = temporary_database()?;
+fn fresh_databases_accept_only_opaque_source_and_request_ids() -> TestResult {
+    let (directory, database) = temporary_database()?;
     let profile = database.profiles().insert(&NewProfile {
-        display_name: "Source privacy",
+        display_name: "Import privacy",
         now_ms: 1,
     })?;
     for invalid in [
@@ -869,7 +947,7 @@ fn fresh_databases_accept_only_canonical_or_controlled_legacy_source_ids() -> Te
         let result = database.imports().begin_or_get(&NewImport {
             profile_id: profile.id,
             machine_id: None,
-            import_key: invalid,
+            import_key: REQUEST_SIX,
             source_uri: invalid,
             loader_name: "resmed",
             initial_status: InitialImportStatus::Blocked,
@@ -882,21 +960,56 @@ fn fresh_databases_accept_only_canonical_or_controlled_legacy_source_ids() -> Te
         );
     }
 
+    for invalid in [
+        "/Users/alice/23123456789/card",
+        "opap-request:fixture",
+        "opap-request:ABCDEF00000000000000000000000000",
+        "opap-request:legacy-0",
+        "opap-request:legacy-01",
+        "opap-request:legacy-9223372036854775808",
+        "opap-request:000000000000000000000000000000000",
+    ] {
+        let result = database.imports().begin_or_get(&NewImport {
+            profile_id: profile.id,
+            machine_id: None,
+            import_key: invalid,
+            source_uri: SOURCE_FOUR,
+            loader_name: "resmed",
+            initial_status: InitialImportStatus::Blocked,
+            state_message: None,
+            created_at_ms: 1,
+        });
+        assert!(
+            matches!(result, Err(StorageError::Integrity(_))),
+            "accepted invalid request identifier {invalid:?}"
+        );
+    }
+
+    assert!(is_canonical_request_id(REQUEST_FIVE));
+    assert!(is_persistable_import_key(REQUEST_FIVE));
+    assert!(is_legacy_request_id(
+        "opap-request:legacy-9223372036854775807"
+    ));
+    assert!(!is_legacy_request_id(
+        "opap-request:legacy-9223372036854775808"
+    ));
+
     let canonical = database.imports().begin_or_get(&NewImport {
         profile_id: profile.id,
         machine_id: None,
-        import_key: "canonical",
+        import_key: REQUEST_FIVE,
         source_uri: SOURCE_ONE,
         loader_name: "resmed",
         initial_status: InitialImportStatus::Blocked,
         state_message: None,
         created_at_ms: 2,
     })?;
+    assert_eq!(canonical.history.import_key, REQUEST_FIVE);
     assert_eq!(canonical.history.source_uri, SOURCE_ONE);
-    let legacy = database.imports().begin_or_get(&NewImport {
+    let legacy_source = database.imports().begin_or_get(&NewImport {
         profile_id: profile.id,
         machine_id: None,
-        import_key: "legacy-placeholder",
+        import_key: REQUEST_SIX,
         source_uri: "opap-source:legacy-9223372036854775807",
         loader_name: "resmed",
         initial_status: InitialImportStatus::Blocked,
@@ -904,9 +1017,22 @@ fn fresh_databases_accept_only_canonical_or_controlled_legacy_source_ids() -> Te
         created_at_ms: 3,
     })?;
     assert_eq!(
-        legacy.history.source_uri,
+        legacy_source.history.source_uri,
         "opap-source:legacy-9223372036854775807"
     );
+    assert!(matches!(
+        database.imports().begin_or_get(&NewImport {
+            profile_id: profile.id,
+            machine_id: None,
+            import_key: "opap-request:legacy-9223372036854775807",
+            source_uri: SOURCE_TWO,
+            loader_name: "resmed",
+            initial_status: InitialImportStatus::Blocked,
+            state_message: None,
+            created_at_ms: 4,
+        }),
+        Err(StorageError::Integrity(_))
+    ));
     assert!(
         database
             .connection()
@@ -916,6 +1042,56 @@ fn fresh_databases_accept_only_canonical_or_controlled_legacy_source_ids() -> Te
             )
             .is_err(),
         "raw SQL must not bypass source identifier validation"
+    );
+    assert!(
+        database
+            .connection()
+            .execute(
+                "UPDATE import_history SET import_key = '/tmp/serial-23123456789'
+                 WHERE id = ?1",
+                [canonical.history.id],
+            )
+            .is_err(),
+        "raw SQL must not bypass request identifier validation on update"
+    );
+    assert!(
+        database
+            .connection()
+            .execute(
+                "INSERT INTO import_history (
+                     profile_id, import_key, source_uri, loader_name, attempt,
+                     status, created_at_ms, updated_at_ms
+                 ) VALUES (?1, '/tmp/serial-23123456789', ?2, 'resmed', 1,
+                           'blocked', 4, 4)",
+                rusqlite::params![profile.id, SOURCE_TWO],
+            )
+            .is_err(),
+        "raw SQL must not bypass request identifier validation on insert"
+    );
+    assert!(
+        database
+            .connection()
+            .execute(
+                "INSERT INTO import_history (
+                     profile_id, import_key, source_uri, loader_name, attempt,
+                     status, created_at_ms, updated_at_ms
+                 ) VALUES (?1, 'opap-request:legacy-1', ?2, 'resmed', 1,
+                           'blocked', 4, 4)",
+                rusqlite::params![profile.id, SOURCE_TWO],
+            )
+            .is_err(),
+        "callers must not mint migration-only legacy request keys"
+    );
+    let canonical_id = canonical.history.id;
+    drop(database);
+    let reopened = Database::open(directory.path().join("opap.sqlite3"))?;
+    assert_eq!(
+        reopened
+            .imports()
+            .get(canonical_id)?
+            .expect("canonical import after reopen")
+            .import_key,
+        REQUEST_FIVE
     );
     Ok(())
 }
@@ -927,7 +1103,7 @@ fn interrupted_jobs_recover_and_failed_attempts_retry_without_rewriting_history(
     let begun = database.imports().begin_or_get(&NewImport {
         profile_id: ids.profile,
         machine_id: Some(ids.machine),
-        import_key: "retryable-job",
+        import_key: REQUEST_FOUR,
         source_uri: SOURCE_FOUR,
         loader_name: "resmed",
         initial_status: InitialImportStatus::Running,
@@ -997,7 +1173,7 @@ fn interrupted_jobs_recover_and_failed_attempts_retry_without_rewriting_history(
             .imports()
             .list_by_profile(ids.profile)?
             .into_iter()
-            .filter(|job| job.import_key == "retryable-job")
+            .filter(|job| job.import_key == REQUEST_FOUR)
             .count(),
         1
     );
@@ -1025,7 +1201,7 @@ fn interrupted_jobs_recover_and_failed_attempts_retry_without_rewriting_history(
     assert_eq!(
         database
             .imports()
-            .find_by_key(ids.profile, "retryable-job")?
+            .find_by_key(ids.profile, REQUEST_FOUR)?
             .expect("latest attempt")
             .id,
         retry.history.id
@@ -1065,7 +1241,7 @@ fn interrupted_jobs_recover_and_failed_attempts_retry_without_rewriting_history(
             .imports()
             .list_by_profile(ids.profile)?
             .into_iter()
-            .filter(|job| job.import_key == "retryable-job")
+            .filter(|job| job.import_key == REQUEST_FOUR)
             .count(),
         2
     );
@@ -1157,7 +1333,8 @@ fn migrates_legacy_in_progress_and_magic_cancelled_jobs_to_typed_states() -> Tes
              id, profile_id, import_key, source_uri, loader_name, status,
              started_at_ms, completed_at_ms
          ) VALUES (
-             3, 1, 'legacy-completed', '/Users/alice/private-card', 'resmed', 'completed',
+             3, 1, 'SN23123456789:/Users/alice/private-card',
+             '/Users/alice/private-card', 'resmed', 'completed',
              1400, 1500
          )",
         [],
@@ -1217,6 +1394,9 @@ fn migrates_legacy_in_progress_and_magic_cancelled_jobs_to_typed_states() -> Tes
     assert!(cancelled.state_message.is_some());
     for id in 1..=6 {
         let history = database.imports().get(id)?.expect("migrated job");
+        assert_eq!(history.import_key, format!("opap-request:legacy-{id}"));
+        assert!(!history.import_key.contains("SN23123456789"));
+        assert!(!history.import_key.contains('/'));
         assert_eq!(history.source_uri, format!("opap-source:legacy-{id}"));
         assert!(!history.source_uri.contains('/'));
         assert!(!history.source_uri.contains('\\'));
@@ -1289,7 +1469,7 @@ fn upgrades_v1_and_v2_databases_directly_without_retaining_source_paths() -> Tes
             "INSERT INTO import_history (
                  id, profile_id, import_key, source_uri, loader_name, status, started_at_ms
              ) VALUES (
-                 1, 1, 'legacy-direct-upgrade', '/Volumes/private-card',
+                 1, 1, 'SN23123456789:/Volumes/private-card', '/Volumes/private-card',
                  'resmed', 'in_progress', 1100
              )",
             [],
@@ -1302,9 +1482,413 @@ fn upgrades_v1_and_v2_databases_directly_without_retaining_source_paths() -> Tes
         assert_eq!(database.schema_version()?, LATEST_SCHEMA_VERSION);
         let history = database.imports().get(1)?.expect("upgraded job");
         assert_eq!(history.status, ImportStatus::Running);
+        assert_eq!(history.import_key, "opap-request:legacy-1");
+        assert!(!history.import_key.contains("SN23123456789"));
         assert_eq!(history.source_uri, "opap-source:legacy-1");
         assert!(!history.source_uri.contains("private-card"));
     }
+    Ok(())
+}
+
+#[test]
+fn every_pre_v7_schema_scrubs_serial_and_path_import_keys() -> TestResult {
+    for legacy_version in 1_usize..=6 {
+        let directory = tempfile::tempdir()?;
+        let path = directory
+            .path()
+            .join(format!("import-key-privacy-v{legacy_version}.sqlite3"));
+        let connection = database_at_schema_version(&path, legacy_version)?;
+        connection.execute(
+            "INSERT INTO profiles (id, display_name, created_at_ms, updated_at_ms)
+             VALUES (1, 'Legacy privacy', 1000, 1000)",
+            [],
+        )?;
+        let canary = format!("SN23123456789:/Users/alice/v{legacy_version}/SD_CARD");
+        if legacy_version <= 3 {
+            connection.execute(
+                "INSERT INTO import_history (
+                     id, profile_id, import_key, source_uri, loader_name, status, started_at_ms
+                 ) VALUES (71, 1, ?1, '/Volumes/patient-card',
+                           'resmed', 'in_progress', 1100)",
+                [&canary],
+            )?;
+        } else {
+            connection.execute(
+                "INSERT INTO import_history (
+                     id, profile_id, import_key, source_uri, loader_name, attempt,
+                     status, created_at_ms, updated_at_ms, started_at_ms
+                 ) VALUES (71, 1, ?1, ?2, 'resmed', 1,
+                           'running', 1100, 1100, 1100)",
+                rusqlite::params![canary, SOURCE_ONE],
+            )?;
+        }
+        drop(connection);
+
+        let database = Database::open(&path)?;
+        let history = database.imports().get(71)?.expect("upgraded import");
+        assert_eq!(history.import_key, "opap-request:legacy-71");
+        assert!(!history.import_key.contains("23123456789"));
+        assert!(!history.import_key.contains("alice"));
+        assert!(!history.import_key.contains("SD_CARD"));
+        assert_eq!(history.attempt, 1);
+        if legacy_version <= 3 {
+            assert_eq!(history.source_uri, "opap-source:legacy-71");
+        } else {
+            assert_eq!(history.source_uri, SOURCE_ONE);
+        }
+        assert_eq!(database.schema_version()?, LATEST_SCHEMA_VERSION);
+    }
+    Ok(())
+}
+
+#[test]
+fn v7_rebuild_scrubs_collisions_and_preserves_retry_attempt_groups() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("v6-import-key-privacy.sqlite3");
+    let connection = database_at_schema_version(&path, 6)?;
+    connection.execute(
+        "INSERT INTO profiles (id, display_name, created_at_ms, updated_at_ms)
+         VALUES (1, 'V6 privacy', 1, 1)",
+        [],
+    )?;
+    connection.execute(
+        "INSERT INTO import_history (
+             id, profile_id, import_key, source_uri, loader_name, attempt,
+             status, created_at_ms, updated_at_ms
+         ) VALUES (1, 1, 'SN23123456789:/Users/alice/card', ?1, 'resmed', 1,
+                   'blocked', 1, 1)",
+        [SOURCE_ONE],
+    )?;
+    connection.execute(
+        "INSERT INTO import_history (
+             id, profile_id, import_key, source_uri, loader_name, attempt,
+             status, created_at_ms, updated_at_ms
+         ) VALUES (2, 1, 'opap-request:legacy-1',
+                   ?1 || char(0) || '/Users/alice/source-leak', 'resmed', 1,
+                   'blocked', 2, 2)",
+        [SOURCE_TWO],
+    )?;
+    connection.execute(
+        "INSERT INTO import_history (
+             id, profile_id, import_key, source_uri, loader_name, attempt,
+             status, created_at_ms, updated_at_ms, started_at_ms, completed_at_ms,
+             sessions_created, error_message
+         ) VALUES (3, 1, ?1, ?2, 'resmed', 1,
+                   'failed', 10, 20, 10, 20, 7, 'legacy failure')",
+        rusqlite::params![REQUEST_ONE, SOURCE_THREE],
+    )?;
+    connection.execute(
+        "INSERT INTO import_history (
+             id, profile_id, import_key, source_uri, loader_name, attempt,
+             retry_of_id, status, created_at_ms, updated_at_ms
+         ) VALUES (4, 1, ?1, ?2, 'resmed', 2, 3, 'blocked', 30, 30)",
+        rusqlite::params![REQUEST_ONE, SOURCE_THREE],
+    )?;
+    connection.execute(
+        "INSERT INTO import_history (
+             id, profile_id, import_key, source_uri, loader_name, attempt,
+             status, created_at_ms, updated_at_ms, completed_at_ms
+         ) VALUES (6, 1, 'SN99887766:/private/retry', ?1, 'resmed', 1,
+                   'cancelled', 50, 60, 60)",
+        [SOURCE_FOUR],
+    )?;
+    connection.execute(
+        "INSERT INTO import_history (
+             id, profile_id, import_key, source_uri, loader_name, attempt,
+             status, created_at_ms, updated_at_ms
+         ) VALUES (8, 1, ?1 || char(0) || '/private/key-leak', ?2, 'resmed', 1,
+                   'blocked', 80, 80)",
+        rusqlite::params![REQUEST_TWO, SOURCE_ONE],
+    )?;
+    drop(connection);
+
+    let before_migration = std::fs::read(&path)?;
+    for canary in [
+        b"SN23123456789".as_slice(),
+        b"/Users/alice".as_slice(),
+        b"/private/key-leak".as_slice(),
+    ] {
+        assert!(
+            before_migration
+                .windows(canary.len())
+                .any(|window| window == canary),
+            "v6 fixture must contain the privacy canary before migration"
+        );
+    }
+
+    let database = Database::open(&path)?;
+    let wal_path = sqlite_wal_path(&path);
+    for storage_path in [&path, &wal_path] {
+        if storage_path.exists() {
+            let bytes = std::fs::read(storage_path)?;
+            for canary in [
+                b"SN23123456789".as_slice(),
+                b"/Users/alice".as_slice(),
+                b"/private/key-leak".as_slice(),
+            ] {
+                assert!(
+                    !bytes.windows(canary.len()).any(|window| window == canary),
+                    "privacy canary remained in {}",
+                    storage_path.display()
+                );
+            }
+            if storage_path == &wal_path {
+                assert!(bytes.is_empty(), "privacy checkpoint must truncate the WAL");
+            }
+        }
+    }
+    let first = database.imports().get(1)?.expect("first legacy import");
+    let collision = database.imports().get(2)?.expect("collision import");
+    let failed = database.imports().get(3)?.expect("failed attempt");
+    let retry = database.imports().get(4)?.expect("retry attempt");
+    let nul_key = database.imports().get(8)?.expect("NUL-bearing key import");
+    assert_eq!(first.import_key, "opap-request:legacy-1");
+    assert_eq!(collision.import_key, "opap-request:legacy-2");
+    assert_eq!(collision.source_uri, "opap-source:legacy-2");
+    assert_eq!(failed.import_key, "opap-request:legacy-3");
+    assert_eq!(retry.import_key, failed.import_key);
+    assert_eq!(failed.attempt, 1);
+    assert_eq!(failed.sessions_created, 7);
+    assert_eq!(retry.attempt, 2);
+    assert_eq!(retry.retry_of_id, Some(failed.id));
+    assert_eq!(nul_key.import_key, "opap-request:legacy-8");
+    assert!(!nul_key.import_key.contains('\0'));
+    assert_eq!(
+        database
+            .imports()
+            .find_by_key(1, "opap-request:legacy-3")?
+            .expect("latest logical attempt")
+            .id,
+        retry.id
+    );
+    let inherited_retry = database
+        .imports()
+        .retry_or_get(
+            6,
+            &RetryImport {
+                initial_status: InitialImportStatus::Blocked,
+                state_message: Some("retry migrated job"),
+                created_at_ms: 70,
+            },
+        )?
+        .expect("migrated cancelled attempt");
+    assert!(inherited_retry.inserted);
+    assert_eq!(inherited_retry.history.import_key, "opap-request:legacy-6");
+    assert_eq!(inherited_retry.history.attempt, 2);
+    assert_eq!(inherited_retry.history.retry_of_id, Some(6));
+    let other_profile = database.profiles().insert(&NewProfile {
+        display_name: "Wrong retry owner",
+        now_ms: 90,
+    })?;
+    assert!(
+        database
+            .connection()
+            .execute(
+                "UPDATE import_history
+                 SET profile_id = ?2, attempt = 8, retry_of_id = NULL
+                 WHERE id = ?1",
+                rusqlite::params![retry.id, other_profile.id],
+            )
+            .is_err(),
+        "nonterminal retry identity must be immutable"
+    );
+    let unchanged_retry = database.imports().get(retry.id)?.expect("unchanged retry");
+    assert_eq!(unchanged_retry.profile_id, 1);
+    assert_eq!(unchanged_retry.attempt, 2);
+    assert_eq!(unchanged_retry.retry_of_id, Some(failed.id));
+    for id in [first.id, failed.id] {
+        assert!(
+            database
+                .connection()
+                .execute("UPDATE import_history SET id = 99 WHERE id = ?1", [id],)
+                .is_err(),
+            "import row ids must be immutable in every state"
+        );
+    }
+    let foreign_key_violations: i64 = database.connection().query_row(
+        "SELECT COUNT(*) FROM pragma_foreign_key_check",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(foreign_key_violations, 0);
+    assert!(
+        database
+            .connection()
+            .execute(
+                "UPDATE import_history SET import_key = ?2 WHERE id = ?1",
+                rusqlite::params![failed.id, REQUEST_TWO],
+            )
+            .is_err(),
+        "terminal history protection must survive the rebuild"
+    );
+
+    database.connection().execute_batch(
+        "DROP TRIGGER import_history_validate_request_key_insert;
+         DROP TRIGGER import_history_validate_request_key_update;",
+    )?;
+    assert!(
+        database
+            .connection()
+            .execute(
+                "INSERT INTO import_history (
+                     id, profile_id, import_key, source_uri, loader_name, attempt,
+                     status, created_at_ms, updated_at_ms
+                 ) VALUES (5, 1, 'opap-request:legacy-3', ?1, 'resmed', 2,
+                           'blocked', 40, 40)",
+                [SOURCE_FOUR],
+            )
+            .is_err(),
+        "logical attempt uniqueness must survive the rebuild"
+    );
+    assert!(
+        database
+            .connection()
+            .execute(
+                "UPDATE import_history SET import_key = '/Users/alice/key-leak' WHERE id = 1",
+                [],
+            )
+            .is_err(),
+        "the table CHECK must enforce request privacy without triggers"
+    );
+    assert!(
+        database
+            .connection()
+            .execute(
+                "UPDATE import_history SET import_key = ?1 || char(0) || '/secret'
+                 WHERE id = 1",
+                [REQUEST_TWO],
+            )
+            .is_err(),
+        "embedded NUL must not bypass the table CHECK"
+    );
+    database
+        .connection()
+        .execute("DELETE FROM import_history WHERE id = ?1", [failed.id])?;
+    assert_eq!(
+        database
+            .imports()
+            .get(retry.id)?
+            .expect("retry after parent cleanup")
+            .retry_of_id,
+        None,
+        "FK cleanup must still clear a nonterminal retry parent"
+    );
+    Ok(())
+}
+
+#[test]
+fn failed_v7_rebuild_rolls_back_schema_triggers_indexes_and_data() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("v7-rollback.sqlite3");
+    let connection = database_at_schema_version(&path, 6)?;
+    connection.execute(
+        "INSERT INTO profiles (id, display_name, created_at_ms, updated_at_ms)
+         VALUES (1, 'Rollback', 1, 1)",
+        [],
+    )?;
+    connection.execute(
+        "INSERT INTO import_history (
+             id, profile_id, import_key, source_uri, loader_name, attempt,
+             status, created_at_ms, updated_at_ms
+         ) VALUES (0, 1, 'SN23123456789:/private/card', ?1, 'resmed', 1,
+                   'blocked', 1, 1)",
+        [SOURCE_ONE],
+    )?;
+    drop(connection);
+
+    for _ in 0..2 {
+        assert!(
+            Database::open(&path).is_err(),
+            "non-positive legacy row ids must fail v7 deterministically"
+        );
+        let unchanged = rusqlite::Connection::open(&path)?;
+        let user_version: i64 = unchanged.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        let migration_version: i64 =
+            unchanged.query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })?;
+        let import_key: String = unchanged.query_row(
+            "SELECT import_key FROM import_history WHERE id = 0",
+            [],
+            |row| row.get(0),
+        )?;
+        let old_table_count: i64 = unchanged.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'import_history_v6'",
+            [],
+            |row| row.get(0),
+        )?;
+        let trigger_count: i64 = unchanged.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'trigger' AND tbl_name = 'import_history'",
+            [],
+            |row| row.get(0),
+        )?;
+        let index_count: i64 = unchanged.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'index' AND name IN ('imports_by_start', 'imports_by_logical_key')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!((user_version, migration_version), (6, 6));
+        assert_eq!(import_key, "SN23123456789:/private/card");
+        assert_eq!(old_table_count, 0);
+        assert_eq!(trigger_count, 9);
+        assert_eq!(index_count, 2);
+    }
+    Ok(())
+}
+
+#[test]
+fn v7_rejects_malformed_legacy_retry_lineage_without_mutation() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("invalid-v6-retry-lineage.sqlite3");
+    let connection = database_at_schema_version(&path, 6)?;
+    connection.execute(
+        "INSERT INTO profiles (id, display_name, created_at_ms, updated_at_ms)
+         VALUES (1, 'Invalid retry lineage', 1, 1)",
+        [],
+    )?;
+    connection.execute(
+        "INSERT INTO import_history (
+             id, profile_id, import_key, source_uri, loader_name, attempt,
+             status, created_at_ms, updated_at_ms, started_at_ms,
+             completed_at_ms, error_message
+         ) VALUES (1, 1, 'parent-private-key', ?1, 'resmed', 1,
+                   'failed', 10, 20, 10, 20, 'failed')",
+        [SOURCE_ONE],
+    )?;
+    connection.execute(
+        "INSERT INTO import_history (
+             id, profile_id, import_key, source_uri, loader_name, attempt,
+             retry_of_id, status, created_at_ms, updated_at_ms
+         ) VALUES (2, 1, 'different-private-key', ?1, 'resmed', 8,
+                   1, 'blocked', 30, 30)",
+        [SOURCE_ONE],
+    )?;
+    drop(connection);
+
+    assert!(Database::open(&path).is_err());
+    let unchanged = rusqlite::Connection::open(&path)?;
+    let user_version: i64 = unchanged.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let migration_version: i64 =
+        unchanged.query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })?;
+    let child: (String, i64, Option<i64>) = unchanged.query_row(
+        "SELECT import_key, attempt, retry_of_id FROM import_history WHERE id = 2",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    assert_eq!((user_version, migration_version), (6, 6));
+    assert_eq!(child, ("different-private-key".to_owned(), 8, Some(1)));
+    assert_eq!(
+        unchanged.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'import_history_v6'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?,
+        0
+    );
     Ok(())
 }
 
@@ -1321,10 +1905,16 @@ fn v5_redacts_terminal_paths_from_early_v4_databases_before_reprotecting_them() 
          DROP TRIGGER import_history_protect_terminal_state;
          DROP TRIGGER import_history_validate_retry_time_insert;
          DROP TRIGGER import_history_protect_terminal_links;
+         DROP TRIGGER import_history_validate_request_key_insert;
+         DROP TRIGGER import_history_validate_request_key_update;
+         DROP TRIGGER import_history_protect_import_identity;
          PRAGMA ignore_check_constraints = ON;",
     )?;
     connection.execute(
-        "UPDATE import_history SET source_uri = '/Users/alice/terminal-card' WHERE id = ?1",
+        "UPDATE import_history
+         SET source_uri = '/Users/alice/terminal-card',
+             import_key = 'SN23123456789:/Users/alice/terminal-card'
+         WHERE id = ?1",
         [ids.import],
     )?;
     connection.execute_batch(
@@ -1344,6 +1934,11 @@ fn v5_redacts_terminal_paths_from_early_v4_databases_before_reprotecting_them() 
     assert_eq!(database.schema_version()?, LATEST_SCHEMA_VERSION);
     let history = database.imports().get(ids.import)?.expect("terminal job");
     assert_eq!(history.status, ImportStatus::Completed);
+    assert_eq!(
+        history.import_key,
+        format!("opap-request:legacy-{}", ids.import)
+    );
+    assert!(!history.import_key.contains("23123456789"));
     assert_eq!(
         history.source_uri,
         format!("opap-source:legacy-{}", ids.import)
@@ -1401,15 +1996,15 @@ fn rejects_disagreement_between_user_version_and_migration_history() -> TestResu
     for (case_name, tamper_sql, expected_user, expected_history) in [
         (
             "stale-user-version",
-            "PRAGMA user_version = 5;",
-            5_i64,
+            "PRAGMA user_version = 6;",
             6_i64,
+            7_i64,
         ),
         (
             "missing-history-row",
-            "DELETE FROM schema_migrations WHERE version = 6;",
+            "DELETE FROM schema_migrations WHERE version = 7;",
+            7_i64,
             6_i64,
-            5_i64,
         ),
     ] {
         let directory = tempfile::tempdir()?;

@@ -15,7 +15,14 @@ waveforms, and chunks that disappeared from a newly parsed session.
 Import jobs persist explicit `blocked`, `running`, `completed`, `failed`, and
 `cancelled` states. Interrupted running jobs recover to blocked, while retries
 create time-ordered linked attempts so terminal history is never rewritten.
-Persisted import sources are opaque identifiers rather than filesystem paths.
+Persisted import sources and request keys are opaque identifiers rather than
+filesystem paths, serials, or caller-provided labels. New jobs require a
+service-generated `opap-request:` ID with 32 lowercase hexadecimal characters.
+The `opap-request:legacy-<row-id>` form is reserved for privacy-migrated history
+and retries that inherit that history; callers cannot create legacy keys. The
+v7 rebuild runs with SQLite secure deletion and truncates the WAL after open so
+the records it replaces do not remain in those SQLite storage areas; this is
+not a general-purpose disk sanitization guarantee.
 
 ```sh
 rustup run stable cargo test --manifest-path crates/opap-storage/Cargo.toml

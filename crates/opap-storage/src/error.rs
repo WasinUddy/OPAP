@@ -57,6 +57,9 @@ pub enum Error {
         history_version: i64,
     },
 
+    #[error("database schema fingerprint mismatch: {0}")]
+    InvalidSchemaFingerprint(String),
+
     #[error(
         "foreign key violation in table {table:?}, row {row_id:?}, referencing {parent:?} (constraint {foreign_key_index})"
     )]
@@ -102,6 +105,7 @@ impl Error {
             | Self::InvalidMigrationHistory { .. }
             | Self::InvalidMigrationName { .. }
             | Self::MigrationVersionMismatch { .. }
+            | Self::InvalidSchemaFingerprint(_)
             | Self::UnexpectedApplicationId { .. } => ErrorCategory::Schema,
             Self::ForeignKeyViolation { .. } | Self::Integrity(_) => ErrorCategory::Integrity,
             Self::InvalidImportTransition { .. } | Self::ImportTimestampRegression { .. } => {
@@ -187,8 +191,8 @@ mod tests {
     #[test]
     fn categories_are_safe_and_domain_specific() {
         let schema = Error::SchemaTooNew {
-            found: 7,
-            supported: 6,
+            found: 8,
+            supported: 7,
         };
         assert_eq!(schema.category(), ErrorCategory::Schema);
         assert_eq!(schema.category().as_str(), "schema");

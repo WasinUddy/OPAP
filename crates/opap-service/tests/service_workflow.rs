@@ -494,7 +494,7 @@ fn storage_boundary_rejects_raw_source_paths() -> TestResult {
         .begin_or_get(&NewImport {
             profile_id: profile.id,
             machine_id: None,
-            import_key: "path-bearing-job",
+            import_key: "opap-request:0123456789abcdef0123456789abcdef",
             source_uri: raw_path,
             loader_name: "resmed",
             initial_status: InitialImportStatus::Blocked,

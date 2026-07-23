@@ -1,6 +1,7 @@
 use crate::{
     BeginImport, Error, ImportCounts, ImportHistory, ImportStatus, ImportTransition, NewImport,
-    Result, RetryImport, is_persistable_source_id,
+    Result, RetryImport, is_canonical_request_id, is_persistable_import_key,
+    is_persistable_source_id,
 };
 use rusqlite::{Connection, OptionalExtension, params, types::Type};
 use std::io;
@@ -24,6 +25,11 @@ impl<'connection> Imports<'connection> {
     /// explicitly blocked or running, so preparation never masquerades as work.
     /// Repeating the same logical import returns its latest attempt.
     pub fn begin_or_get(&self, input: &NewImport<'_>) -> Result<BeginImport> {
+        if !is_canonical_request_id(input.import_key) {
+            return Err(Error::Integrity(
+                "new import key must be a service-generated OPAP request identifier".to_owned(),
+            ));
+        }
         if !is_persistable_source_id(input.source_uri) {
             return Err(Error::Integrity(
                 "import source must be an opaque OPAP source identifier".to_owned(),
@@ -316,6 +322,11 @@ impl<'connection> Imports<'connection> {
                 operation: "retry",
             });
         }
+        if !is_persistable_import_key(&source.import_key) {
+            return Err(Error::Integrity(
+                "stored import key is not an opaque OPAP request identifier".to_owned(),
+            ));
+        }
         let previous_at_ms = source
             .updated_at_ms
             .max(source.completed_at_ms.unwrap_or(source.updated_at_ms));
@@ -345,7 +356,8 @@ impl<'connection> Imports<'connection> {
                  attempt, retry_of_id, status, state_message, created_at_ms,
                  updated_at_ms, started_at_ms
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11)
-             ON CONFLICT DO NOTHING RETURNING {COLUMNS}"
+             ON CONFLICT(retry_of_id) DO NOTHING
+             RETURNING {COLUMNS}"
         );
         let inserted = self
             .connection

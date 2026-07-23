@@ -85,6 +85,7 @@ impl ApiError {
             StorageError::InvalidMigrationHistory { .. }
             | StorageError::InvalidMigrationName { .. }
             | StorageError::MigrationVersionMismatch { .. }
+            | StorageError::InvalidSchemaFingerprint(_)
             | StorageError::ForeignKeyViolation { .. }
             | StorageError::Integrity(_) => Self::new(
                 ApiErrorCode::StorageUnavailable,
