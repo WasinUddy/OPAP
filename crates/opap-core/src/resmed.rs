@@ -35,8 +35,9 @@
 //! summary data that parses and matches that serial. A bad STR can be omitted
 //! while OSCAR continues with DATALOG detail files, so STR verification is not
 //! itself an unconditional `Open` rejection gate. OPAP still does not import
-//! STR summaries; the first detail slice emits partial sessions only from
-//! validated, uncompressed BRP waveform files.
+//! STR summaries; the current detail slice emits BRP-backed partial sessions
+//! from validated, uncompressed BRP waveforms and attaches trustworthy
+//! uncompressed SAD/SA2 oximetry without treating it as therapy usage.
 
 use crate::domain::{DeviceInfo, ImportWarning, WarningSeverity};
 use crate::importer::{
@@ -135,7 +136,7 @@ pub struct CardDiscovery {
 /// Filesystem-independent ResMed importer.
 ///
 /// Discovery, inventory, bounded EDF header indexing, and an intentionally
-/// partial uncompressed-BRP waveform import are implemented.
+/// partial uncompressed BRP plus SAD/SA2 detail import are implemented.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ResmedImporter;
 

@@ -3,16 +3,18 @@
 // Copyright (C) 2026 OPAP contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// Selectively ported from OSCAR's ResMed BRP loading concepts:
+// Selectively ported from OSCAR's ResMed BRP and SAD/SA2 loading concepts:
 // https://gitlab.com/CrimsonNape/OSCAR-code
 // Upstream commit: 64c5e90a26f91fb15868bcfcccde0c1e1522ac86
 // Relevant upstream file: oscar/SleepLib/loader_plugins/resmed_loader.cpp
 // Modified: 2026-07-23
 
-//! First bounded ResMed session-import slice: uncompressed BRP waveforms.
+//! Bounded ResMed detail import: uncompressed BRP waveforms plus SAD/SA2
+//! oximetry.
 //!
 //! This deliberately produces partial sessions. STR mask intervals, settings,
-//! EVE/CSL events, PLD detail, and oximetry are not decoded by this slice.
+//! EVE/CSL events, and PLD detail are not decoded by this slice. Oximetry is
+//! attached only to a candidate with trustworthy decoded BRP therapy data.
 
 #[cfg(test)]
 use super::ResmedSessionIndex;
@@ -31,20 +33,28 @@ use crate::importer::{
     SourceEntryKind,
 };
 use opap_channels::{ResmedFileKind, resmed_signal_prefix};
-use opap_edf::{EdfHeader, Limits, Parser};
+use opap_edf::{EdfFile, EdfHeader, Limits, Parser, Signal};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Maximum bytes read from one uncompressed BRP file.
+/// Maximum bytes read from one uncompressed BRP, SAD, or SA2 file.
+///
+/// The BRP-prefixed name is retained as part of the existing public API.
 pub const RESMED_BRP_MAX_FILE_BYTES: usize = 256 * 1024 * 1024;
 
-/// Maximum BRP files decoded by one import.
+/// Maximum aggregate BRP, SAD, and SA2 files decoded by one import.
+///
+/// The BRP-prefixed name is retained as part of the existing public API.
 pub const RESMED_BRP_MAX_FILES_PER_IMPORT: usize = 4_096;
 
-/// Maximum aggregate indexed BRP bytes accepted by one import.
+/// Maximum aggregate indexed BRP, SAD, and SA2 bytes accepted by one import.
+///
+/// The BRP-prefixed name is retained as part of the existing public API.
 pub const RESMED_BRP_MAX_TOTAL_BYTES_PER_IMPORT: u64 = 512 * 1024 * 1024;
 
-/// Maximum calibrated BRP samples materialized by one import.
+/// Maximum calibrated BRP and oximetry samples materialized by one import.
+///
+/// The BRP-prefixed name is retained as part of the existing public API.
 pub const RESMED_BRP_MAX_OUTPUT_SAMPLES_PER_IMPORT: usize = 50_000_000;
 
 const RESMED_BRP_MAX_SIGNALS: usize = 64;
@@ -55,8 +65,12 @@ const RESMED_BRP_MAX_ANNOTATION_BYTES: usize = 1024 * 1024;
 const RESMED_BRP_MAX_ANNOTATION_RECORDS: usize = 100_000;
 const RESMED_BRP_MAX_ANNOTATIONS: usize = 100_000;
 const RESMED_BRP_MAX_ANNOTATION_TEXT_BYTES: usize = 1024 * 1024;
+const RESMED_DETAIL_MAX_OUTPUT_SERIES_PER_IMPORT: usize = 100_000;
 const MAX_FIXED_UTC_OFFSET_SECONDS: u32 = 64_800;
+const MAX_TIMEZONE_BASIS_BYTES: usize = 256;
 const FLOW_RATE_CHANNEL: &str = "pap.series.flow_rate";
+const PULSE_RATE_CHANNEL: &str = "oximetry.series.pulse_rate";
+const OXYGEN_SATURATION_CHANNEL: &str = "oximetry.series.oxygen_saturation";
 
 const BRP_LIMITS: Limits = Limits {
     max_signals: RESMED_BRP_MAX_SIGNALS,
@@ -126,10 +140,10 @@ pub(super) fn import_resmed_sessions(
             eligible_candidates.push(candidate);
         }
     }
-    let mut import_budget = BrpImportBudget::from_candidates(&eligible_candidates)?;
-
-    for candidate in eligible_candidates {
-        let decoded = decode_candidate(
+    let mut import_budget = DetailImportBudget::from_brp_candidates(&eligible_candidates)?;
+    let mut anchored_candidates = Vec::new();
+    for candidate in eligible_candidates.iter().copied() {
+        let decoded = decode_brp_candidate(
             source,
             candidate,
             &machine_serial,
@@ -137,10 +151,29 @@ pub(super) fn import_resmed_sessions(
             &mut statistics,
             &mut import_budget,
         )?;
+        if decoded.session.is_some() {
+            anchored_candidates.push((candidate, decoded));
+        } else {
+            warnings.extend(decoded.warnings);
+        }
+    }
+
+    for (candidate, mut decoded) in anchored_candidates {
+        let mut session = decoded
+            .session
+            .take()
+            .expect("anchored candidate contains a BRP-backed session");
+        attach_candidate_oximetry(
+            source,
+            candidate,
+            &machine_serial,
+            clock,
+            &mut session,
+            &mut decoded.warnings,
+            &mut statistics,
+            &mut import_budget,
+        )?;
         warnings.extend(decoded.warnings);
-        let Some(mut session) = decoded.session else {
-            continue;
-        };
 
         if options
             .sessions_not_before_unix_ms
@@ -156,7 +189,7 @@ pub(super) fn import_resmed_sessions(
         }
         warnings.push(warning(
             "resmed_partial_brp_session",
-            "Imported BRP waveforms only; STR intervals, settings, events, PLD detail, and oximetry are unavailable",
+            "Imported bounded BRP waveforms and any trustworthy SAD/SA2 oximetry; STR intervals, settings, EVE/CSL events, and PLD detail are unavailable",
             None,
             Some(&session.id),
         ));
@@ -179,45 +212,108 @@ struct CandidateDecode {
     warnings: Vec<ImportWarning>,
 }
 
-struct DecodedBrpFile {
+struct DecodedDetailFile {
     local_start_ms: i64,
     local_end_ms: i64,
-    fingerprint: [u8; 32],
     waveforms: Vec<WaveformSeries>,
     channels: Vec<ChannelMetadata>,
 }
 
-#[derive(Debug, Default)]
-struct BrpImportBudget {
-    actual_bytes_read: u64,
-    output_samples: usize,
+struct ParsedDetailEdf {
+    parsed: EdfFile,
+    local_start_ms: i64,
+    local_end_ms: i64,
+    fingerprint: [u8; 32],
 }
 
-impl BrpImportBudget {
-    fn from_candidates(candidates: &[&ResmedSessionCandidate]) -> Result<Self, ImportError> {
-        validate_indexed_brp_resources(candidates)?;
-        Ok(Self::default())
+#[derive(Debug, Default)]
+struct DetailImportBudget {
+    indexed_files: usize,
+    indexed_bytes: u64,
+    actual_bytes_read: u64,
+    output_samples: usize,
+    output_series: usize,
+}
+
+impl DetailImportBudget {
+    fn from_brp_candidates(candidates: &[&ResmedSessionCandidate]) -> Result<Self, ImportError> {
+        let (indexed_files, indexed_bytes) = validate_indexed_brp_resources(candidates)?;
+        Ok(Self {
+            indexed_files,
+            indexed_bytes,
+            ..Self::default()
+        })
     }
 
     #[cfg(test)]
-    fn from_index(index: &ResmedSessionIndex) -> Result<Self, ImportError> {
+    fn from_brp_index(index: &ResmedSessionIndex) -> Result<Self, ImportError> {
         let candidates: Vec<_> = index.candidates.iter().collect();
-        Self::from_candidates(&candidates)
+        Self::from_brp_candidates(&candidates)
+    }
+
+    fn reserve_optional_indexed_file(
+        &mut self,
+        file: &ResmedSessionFile,
+    ) -> Result<(), ImportError> {
+        if file.size_bytes > u64::try_from(RESMED_BRP_MAX_FILE_BYTES).expect("file budget fits u64")
+        {
+            return Err(aggregate_limit_error(format!(
+                "{} file exceeds the {RESMED_BRP_MAX_FILE_BYTES}-byte import budget",
+                detail_kind_name(file.kind)
+            )));
+        }
+        let indexed_files = self.indexed_files.checked_add(1).ok_or_else(|| {
+            aggregate_limit_error("ResMed detail file-count arithmetic overflowed")
+        })?;
+        if indexed_files > RESMED_BRP_MAX_FILES_PER_IMPORT {
+            return Err(aggregate_limit_error(format!(
+                "ResMed detail import accepts at most {RESMED_BRP_MAX_FILES_PER_IMPORT} files"
+            )));
+        }
+        let indexed_bytes = self
+            .indexed_bytes
+            .checked_add(file.size_bytes)
+            .ok_or_else(|| {
+                aggregate_limit_error("aggregate ResMed detail byte-count arithmetic overflowed")
+            })?;
+        if indexed_bytes > RESMED_BRP_MAX_TOTAL_BYTES_PER_IMPORT {
+            return Err(aggregate_limit_error(format!(
+                "ResMed detail import accepts at most {RESMED_BRP_MAX_TOTAL_BYTES_PER_IMPORT} indexed bytes"
+            )));
+        }
+        self.indexed_files = indexed_files;
+        self.indexed_bytes = indexed_bytes;
+        Ok(())
+    }
+
+    fn ensure_optional_output_capacity(&self) -> Result<(), ImportError> {
+        if self.output_samples >= RESMED_BRP_MAX_OUTPUT_SAMPLES_PER_IMPORT
+            || self.output_series >= RESMED_DETAIL_MAX_OUTPUT_SERIES_PER_IMPORT
+        {
+            return Err(aggregate_limit_error(
+                "ResMed optional detail output capacity is exhausted",
+            ));
+        }
+        Ok(())
     }
 
     fn charge_actual_bytes(&mut self, additional: usize) -> Result<(), ImportError> {
         let additional = u64::try_from(additional).map_err(|_| {
-            aggregate_limit_error("actual BRP byte count exceeds the supported integer range")
+            aggregate_limit_error(
+                "actual ResMed detail byte count exceeds the supported integer range",
+            )
         })?;
         let next = self
             .actual_bytes_read
             .checked_add(additional)
             .ok_or_else(|| {
-                aggregate_limit_error("aggregate actual BRP byte-count arithmetic overflowed")
+                aggregate_limit_error(
+                    "aggregate actual ResMed detail byte-count arithmetic overflowed",
+                )
             })?;
         if next > RESMED_BRP_MAX_TOTAL_BYTES_PER_IMPORT {
             return Err(aggregate_limit_error(format!(
-                "ResMed BRP import reads at most {RESMED_BRP_MAX_TOTAL_BYTES_PER_IMPORT} actual payload bytes"
+                "ResMed detail import reads at most {RESMED_BRP_MAX_TOTAL_BYTES_PER_IMPORT} actual payload bytes"
             )));
         }
         self.actual_bytes_read = next;
@@ -228,27 +324,48 @@ impl BrpImportBudget {
         let remaining = RESMED_BRP_MAX_TOTAL_BYTES_PER_IMPORT
             .checked_sub(self.actual_bytes_read)
             .ok_or_else(|| {
-                aggregate_limit_error("aggregate actual BRP byte accounting is inconsistent")
+                aggregate_limit_error(
+                    "aggregate actual ResMed detail byte accounting is inconsistent",
+                )
             })?;
         if remaining == 0 {
             return Err(aggregate_limit_error(format!(
-                "ResMed BRP import reads at most {RESMED_BRP_MAX_TOTAL_BYTES_PER_IMPORT} actual payload bytes"
+                "ResMed detail import reads at most {RESMED_BRP_MAX_TOTAL_BYTES_PER_IMPORT} actual payload bytes"
             )));
         }
         let remaining = usize::try_from(remaining).unwrap_or(usize::MAX);
         Ok(RESMED_BRP_MAX_FILE_BYTES.min(remaining))
     }
 
-    fn reserve_output_samples(&mut self, additional: usize) -> Result<(), ImportError> {
-        let next = self.output_samples.checked_add(additional).ok_or_else(|| {
-            aggregate_limit_error("aggregate BRP output-sample arithmetic overflowed")
-        })?;
-        if next > RESMED_BRP_MAX_OUTPUT_SAMPLES_PER_IMPORT {
+    fn reserve_output(
+        &mut self,
+        additional_samples: usize,
+        additional_series: usize,
+    ) -> Result<(), ImportError> {
+        let output_samples = self
+            .output_samples
+            .checked_add(additional_samples)
+            .ok_or_else(|| {
+                aggregate_limit_error("aggregate ResMed detail output-sample arithmetic overflowed")
+            })?;
+        if output_samples > RESMED_BRP_MAX_OUTPUT_SAMPLES_PER_IMPORT {
             return Err(aggregate_limit_error(format!(
-                "ResMed BRP import accepts at most {RESMED_BRP_MAX_OUTPUT_SAMPLES_PER_IMPORT} calibrated output samples"
+                "ResMed detail import accepts at most {RESMED_BRP_MAX_OUTPUT_SAMPLES_PER_IMPORT} calibrated output samples"
             )));
         }
-        self.output_samples = next;
+        let output_series = self
+            .output_series
+            .checked_add(additional_series)
+            .ok_or_else(|| {
+                aggregate_limit_error("aggregate ResMed detail output-series arithmetic overflowed")
+            })?;
+        if output_series > RESMED_DETAIL_MAX_OUTPUT_SERIES_PER_IMPORT {
+            return Err(aggregate_limit_error(format!(
+                "ResMed detail import accepts at most {RESMED_DETAIL_MAX_OUTPUT_SERIES_PER_IMPORT} output series"
+            )));
+        }
+        self.output_samples = output_samples;
+        self.output_series = output_series;
         Ok(())
     }
 }
@@ -288,31 +405,36 @@ fn validate_indexed_brp_resources(
     Ok((files, bytes))
 }
 
+const fn is_decoded_detail_kind(kind: ResmedSessionFileKind) -> bool {
+    matches!(
+        kind,
+        ResmedSessionFileKind::Brp | ResmedSessionFileKind::Sad | ResmedSessionFileKind::Sa2
+    )
+}
+
 fn aggregate_limit_error(message: impl Into<String>) -> ImportError {
     ImportError::new(ImportErrorKind::SizeLimitExceeded, message)
 }
 
-fn decode_candidate(
+fn decode_brp_candidate(
     source: &dyn ImportSource,
     candidate: &ResmedSessionCandidate,
     machine_serial: &str,
     clock: &ImportClockContext,
     statistics: &mut ImportStatistics,
-    import_budget: &mut BrpImportBudget,
+    import_budget: &mut DetailImportBudget,
 ) -> Result<CandidateDecode, ImportError> {
     let mut warnings = Vec::new();
-    let mut files = Vec::new();
+    let mut brp_files = Vec::new();
 
-    for (file_ordinal, file) in candidate
+    for file in candidate
         .files
         .iter()
         .filter(|file| file.kind == ResmedSessionFileKind::Brp)
-        .enumerate()
     {
         match decode_brp_file(
             source,
             file,
-            file_ordinal,
             machine_serial,
             clock,
             statistics,
@@ -320,8 +442,10 @@ fn decode_candidate(
         ) {
             Ok(decoded) => {
                 warnings.extend(decoded.1);
-                if let Some(file) = decoded.0 {
-                    files.push(file);
+                if let Some(decoded_file) = decoded.0
+                    && !decoded_file.waveforms.is_empty()
+                {
+                    brp_files.push((file, decoded_file));
                 }
             }
             Err(error) if error.kind == ImportErrorKind::SizeLimitExceeded => {
@@ -336,7 +460,7 @@ fn decode_candidate(
         }
     }
 
-    if files.is_empty() {
+    if brp_files.is_empty() {
         warnings.push(warning(
             "resmed_candidate_not_imported",
             "Candidate has no trustworthy decoded BRP waveform data",
@@ -349,22 +473,16 @@ fn decode_candidate(
         });
     }
 
-    let mut waveforms = Vec::new();
-    let mut channels = BTreeMap::<String, ChannelMetadata>::new();
-    let mut file_fingerprints = Vec::new();
-    let mut local_start_ms = i64::MAX;
-    let mut local_end_ms = i64::MIN;
-    for file in files {
-        local_start_ms = local_start_ms.min(file.local_start_ms);
-        local_end_ms = local_end_ms.max(file.local_end_ms);
-        file_fingerprints.push(file.fingerprint.to_vec());
-        for channel in file.channels {
-            channels.entry(channel.id.clone()).or_insert(channel);
-        }
-        waveforms.extend(file.waveforms);
+    let mut brp_start_ms = i64::MAX;
+    let mut brp_end_ms = i64::MIN;
+    let mut brp_intervals = Vec::with_capacity(brp_files.len());
+    for (_, file) in &brp_files {
+        brp_start_ms = brp_start_ms.min(file.local_start_ms);
+        brp_end_ms = brp_end_ms.max(file.local_end_ms);
+        brp_intervals.push((file.local_start_ms, file.local_end_ms));
     }
 
-    if waveforms.is_empty() || local_end_ms <= local_start_ms {
+    if brp_end_ms <= brp_start_ms {
         warnings.push(warning(
             "resmed_candidate_not_imported",
             "Candidate had no supported, calibrated BRP signals and was not emitted as a session",
@@ -377,20 +495,25 @@ fn decode_candidate(
         });
     }
 
-    let source_key = session_source_key(
-        &candidate.resmed_day,
-        local_start_ms,
-        local_end_ms,
-        &file_fingerprints,
-        &waveforms,
-    );
+    let usage_ms = covered_duration_millis(&mut brp_intervals)?;
+    let source_key = logical_brp_session_source_key(candidate, &brp_files, brp_start_ms);
     let id = opaque_key(
-        "opap/resmed/session-id/v1",
+        "opap/resmed/session-id/v2",
         std::iter::once(source_key.as_bytes()),
     );
-    let start_time = session_timestamp(local_start_ms, clock)?;
-    let end_time = session_timestamp(local_end_ms, clock)?;
-    let usage_ms = end_time
+
+    let mut waveforms = Vec::new();
+    let mut channels = BTreeMap::<String, ChannelMetadata>::new();
+    for (_, file) in brp_files {
+        for channel in file.channels {
+            channels.entry(channel.id.clone()).or_insert(channel);
+        }
+        waveforms.extend(file.waveforms);
+    }
+
+    let start_time = session_timestamp(brp_start_ms, clock)?;
+    let end_time = session_timestamp(brp_end_ms, clock)?;
+    let session_duration_ms = end_time
         .normalized_utc_unix_ms
         .checked_sub(start_time.normalized_utc_unix_ms)
         .and_then(|duration| u64::try_from(duration).ok())
@@ -400,6 +523,12 @@ fn decode_candidate(
                 "clock context produced an invalid session duration",
             )
         })?;
+    if usage_ms > session_duration_ms {
+        return Err(ImportError::new(
+            ImportErrorKind::InvalidData,
+            "BRP coverage exceeds the decoded ResMed session envelope",
+        ));
+    }
 
     for warning in &mut warnings {
         warning.session_id = Some(id.clone());
@@ -427,136 +556,160 @@ fn decode_candidate(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn attach_candidate_oximetry(
+    source: &dyn ImportSource,
+    candidate: &ResmedSessionCandidate,
+    machine_serial: &str,
+    clock: &ImportClockContext,
+    session: &mut Session,
+    warnings: &mut Vec<ImportWarning>,
+    statistics: &mut ImportStatistics,
+    import_budget: &mut DetailImportBudget,
+) -> Result<(), ImportError> {
+    let mut local_start_ms = session
+        .start_time
+        .device_local
+        .as_ref()
+        .ok_or_else(|| {
+            ImportError::new(
+                ImportErrorKind::InvalidData,
+                "BRP-backed session is missing structured local start provenance",
+            )
+        })
+        .and_then(|value| local_unix_millis(value).map_err(invalid_source_clock))?;
+    let mut local_end_ms = session
+        .end_time
+        .device_local
+        .as_ref()
+        .ok_or_else(|| {
+            ImportError::new(
+                ImportErrorKind::InvalidData,
+                "BRP-backed session is missing structured local end provenance",
+            )
+        })
+        .and_then(|value| local_unix_millis(value).map_err(invalid_source_clock))?;
+    let mut channels: BTreeMap<_, _> = std::mem::take(&mut session.channels)
+        .into_iter()
+        .map(|channel| (channel.id.clone(), channel))
+        .collect();
+
+    for file in candidate.files.iter().filter(|file| {
+        matches!(
+            file.kind,
+            ResmedSessionFileKind::Sad | ResmedSessionFileKind::Sa2
+        )
+    }) {
+        if let Err(error) = import_budget.ensure_optional_output_capacity() {
+            warnings.push(optional_oximetry_warning(file, &session.id, &error));
+            continue;
+        }
+        if let Err(error) = import_budget.reserve_optional_indexed_file(file) {
+            warnings.push(optional_oximetry_warning(file, &session.id, &error));
+            continue;
+        }
+        match decode_oximetry_file(
+            source,
+            file,
+            machine_serial,
+            clock,
+            statistics,
+            import_budget,
+        ) {
+            Ok(decoded) => {
+                warnings.extend(decoded.1);
+                let Some(file) = decoded.0 else {
+                    continue;
+                };
+                if file.waveforms.is_empty() {
+                    continue;
+                }
+                // Storage requires each waveform to lie within its parent
+                // session. Expand only the session envelope; BRP coverage
+                // remains the sole source of therapy usage in this partial
+                // importer.
+                local_start_ms = local_start_ms.min(file.local_start_ms);
+                local_end_ms = local_end_ms.max(file.local_end_ms);
+                for channel in file.channels {
+                    channels.entry(channel.id.clone()).or_insert(channel);
+                }
+                session.waveforms.extend(file.waveforms);
+            }
+            Err(error) => warnings.push(optional_oximetry_warning(file, &session.id, &error)),
+        }
+    }
+
+    session.channels = channels.into_values().collect();
+    if local_end_ms <= local_start_ms {
+        return Err(ImportError::new(
+            ImportErrorKind::InvalidData,
+            "decoded ResMed session envelope is empty or reversed",
+        ));
+    }
+    session.start_time = session_timestamp(local_start_ms, clock)?;
+    session.end_time = session_timestamp(local_end_ms, clock)?;
+    let session_duration_ms = session
+        .end_time
+        .normalized_utc_unix_ms
+        .checked_sub(session.start_time.normalized_utc_unix_ms)
+        .and_then(|duration| u64::try_from(duration).ok())
+        .ok_or_else(|| {
+            ImportError::new(
+                ImportErrorKind::InvalidConfiguration,
+                "clock context produced an invalid session duration",
+            )
+        })?;
+    if session.summary.usage_ms > session_duration_ms {
+        return Err(ImportError::new(
+            ImportErrorKind::InvalidData,
+            "BRP coverage exceeds the decoded ResMed session envelope",
+        ));
+    }
+    for warning in warnings {
+        warning.session_id = Some(session.id.clone());
+    }
+    Ok(())
+}
+
+fn optional_oximetry_warning(
+    file: &ResmedSessionFile,
+    session_id: &str,
+    error: &ImportError,
+) -> ImportWarning {
+    warning(
+        format!("resmed_{}_not_decoded", detail_kind_lowercase(file.kind)),
+        format!(
+            "{} oximetry was skipped: {error}",
+            detail_kind_name(file.kind)
+        ),
+        Some(&file.relative_path),
+        Some(session_id),
+    )
+}
+
 fn decode_brp_file(
     source: &dyn ImportSource,
     indexed_file: &ResmedSessionFile,
-    file_ordinal: usize,
     machine_serial: &str,
     clock: &ImportClockContext,
     statistics: &mut ImportStatistics,
-    import_budget: &mut BrpImportBudget,
-) -> Result<(Option<DecodedBrpFile>, Vec<ImportWarning>), ImportError> {
-    if indexed_file
-        .relative_path
-        .to_ascii_lowercase()
-        .ends_with(".gz")
-    {
-        return Err(ImportError::new(
-            ImportErrorKind::UnsupportedOperation,
-            "compressed BRP payloads are not supported by this import slice",
-        )
-        .at_path(&indexed_file.relative_path));
-    }
-    if indexed_file.size_bytes
-        > u64::try_from(RESMED_BRP_MAX_FILE_BYTES).expect("file budget fits u64")
-    {
-        return Err(ImportError::new(
-            ImportErrorKind::SizeLimitExceeded,
-            format!("BRP file exceeds the {RESMED_BRP_MAX_FILE_BYTES}-byte import budget"),
-        )
-        .at_path(&indexed_file.relative_path));
-    }
+    import_budget: &mut DetailImportBudget,
+) -> Result<(Option<DecodedDetailFile>, Vec<ImportWarning>), ImportError> {
+    let (detail, mut warnings) = read_detail_edf(
+        source,
+        indexed_file,
+        machine_serial,
+        statistics,
+        import_budget,
+    )?;
+    let Some(detail) = detail else {
+        return Ok((None, warnings));
+    };
 
-    let read_limit = import_budget.next_actual_read_limit()?;
-    let bytes = source.read_file(&indexed_file.relative_path, read_limit)?;
-    import_budget.charge_actual_bytes(bytes.len())?;
-    if bytes.len() > RESMED_BRP_MAX_FILE_BYTES {
-        return Err(ImportError::new(
-            ImportErrorKind::SizeLimitExceeded,
-            format!(
-                "source adapter returned {} bytes for a BRP file, exceeding the {}-byte import budget",
-                bytes.len(),
-                RESMED_BRP_MAX_FILE_BYTES
-            ),
-        )
-        .at_path(&indexed_file.relative_path));
-    }
-    statistics.files_read = statistics.files_read.saturating_add(1);
-    statistics.bytes_read = statistics
-        .bytes_read
-        .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-    if u64::try_from(bytes.len()).ok() != Some(indexed_file.size_bytes) {
-        return Err(ImportError::new(
-            ImportErrorKind::InvalidData,
-            "BRP file size changed after candidate indexing",
-        )
-        .at_path(&indexed_file.relative_path));
-    }
-
-    let parsed = Parser::new(BRP_LIMITS).parse(&bytes).map_err(|source| {
-        ImportError::new(
-            ImportErrorKind::InvalidData,
-            format!("failed to decode complete BRP EDF: {source}"),
-        )
-        .at_path(&indexed_file.relative_path)
-    })?;
-    let summary = indexed_file.edf_header.as_ref().ok_or_else(|| {
-        ImportError::new(
-            ImportErrorKind::InvalidData,
-            "candidate BRP file has no indexed EDF header summary",
-        )
-        .at_path(&indexed_file.relative_path)
-    })?;
-    validate_header_summary(parsed.header(), summary).map_err(|message| {
-        ImportError::new(ImportErrorKind::InvalidData, message).at_path(&indexed_file.relative_path)
-    })?;
-    if parsed.header().is_discontinuous() {
-        return Err(ImportError::new(
-            ImportErrorKind::InvalidData,
-            "EDF+D BRP files are discontinuous and are not supported",
-        )
-        .at_path(&indexed_file.relative_path));
-    }
-
-    let mut warnings = Vec::new();
-    match recording_serial(&parsed.header().recording_id) {
-        Some(serial) if serial != machine_serial => {
-            warnings.push(warning(
-                "resmed_brp_serial_mismatch",
-                "BRP machine identity did not match the selected card; file skipped",
-                Some(&indexed_file.relative_path),
-                None,
-            ));
-            return Ok((None, warnings));
-        }
-        Some(_) => {}
-        None => warnings.push(warning(
-            "resmed_brp_serial_missing",
-            "BRP recording header has no SRN token; file imported without per-file identity verification",
-            Some(&indexed_file.relative_path),
-            None,
-        )),
-    }
-
-    let local_start = device_local_from_resmed(&indexed_file.selected_start_time)?;
-    let local_start_ms = local_unix_millis(&local_start).map_err(invalid_source_clock)?;
-    let duration_ms = decoded_duration_millis(
-        parsed.record_count(),
-        parsed.header().record_duration_seconds,
-    )
-    .ok_or_else(|| {
-        ImportError::new(
-            ImportErrorKind::InvalidData,
-            "decoded BRP duration is zero, non-finite, or outside timestamp range",
-        )
-        .at_path(&indexed_file.relative_path)
-    })?;
-    let local_end_ms = local_start_ms.checked_add(duration_ms).ok_or_else(|| {
-        ImportError::new(
-            ImportErrorKind::InvalidData,
-            "decoded BRP end time exceeds the supported calendar range",
-        )
-        .at_path(&indexed_file.relative_path)
-    })?;
-    local_datetime_from_millis(local_end_ms).map_err(invalid_source_clock)?;
-
-    let fingerprint = sha256(&bytes);
-    let file_ordinal_bytes = u64::try_from(file_ordinal)
-        .unwrap_or(u64::MAX)
-        .to_be_bytes();
+    let source_discriminator = source_basename_discriminator(indexed_file);
     let mut waveforms = Vec::new();
     let mut channels = Vec::new();
-    for (signal_index, signal) in parsed.signals().iter().enumerate() {
+    for (signal_index, signal) in detail.parsed.signals().iter().enumerate() {
         let label = signal.header.label.trim();
         if label.eq_ignore_ascii_case("Crc16") {
             continue;
@@ -570,33 +723,11 @@ fn decode_brp_file(
             ));
             continue;
         };
-        if signal.header.samples_per_record == 0 {
-            warnings.push(warning(
-                "invalid_resmed_brp_signal",
-                format!("BRP signal {label} has zero samples per record"),
-                Some(&indexed_file.relative_path),
-                None,
-            ));
+        let Some((sample_interval_ms, source_encoding)) =
+            validated_signal_encoding(&detail.parsed, signal, label, indexed_file, &mut warnings)
+        else {
             continue;
-        }
-        let samples_per_record = u32::try_from(signal.header.samples_per_record).map_err(|_| {
-            ImportError::new(
-                ImportErrorKind::InvalidData,
-                format!("BRP signal {label} sample cadence exceeds the supported range"),
-            )
-            .at_path(&indexed_file.relative_path)
-        })?;
-        let sample_interval_ms =
-            parsed.header().record_duration_seconds * 1_000.0 / f64::from(samples_per_record);
-        if !sample_interval_ms.is_finite() || sample_interval_ms <= 0.0 {
-            warnings.push(warning(
-                "invalid_resmed_brp_signal",
-                format!("BRP signal {label} has an invalid sampling interval"),
-                Some(&indexed_file.relative_path),
-                None,
-            ));
-            continue;
-        }
+        };
 
         let flow_scale = if channel.key.as_str() == FLOW_RATE_CHANNEL {
             60.0
@@ -615,10 +746,8 @@ fn decode_brp_file(
                 continue;
             }
         };
-        import_budget.reserve_output_samples(physical.len())?;
-        let mut samples = Vec::with_capacity(physical.len());
         let mut valid = true;
-        for value in physical {
+        for value in physical.clone() {
             let normalized = value * flow_scale;
             #[allow(clippy::cast_possible_truncation)]
             let normalized = normalized as f32;
@@ -626,7 +755,6 @@ fn decode_brp_file(
                 valid = false;
                 break;
             }
-            samples.push(normalized);
         }
         if !valid {
             warnings.push(warning(
@@ -637,6 +765,15 @@ fn decode_brp_file(
             ));
             continue;
         }
+        import_budget.reserve_output(physical.len(), 1)?;
+        let samples = physical
+            .map(|value| {
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    (value * flow_scale) as f32
+                }
+            })
+            .collect();
 
         let signal_index_bytes = u64::try_from(signal_index)
             .unwrap_or(u64::MAX)
@@ -644,8 +781,8 @@ fn decode_brp_file(
         let source_key = opaque_key(
             "opap/resmed/brp-waveform/v1",
             [
-                fingerprint.as_slice(),
-                file_ordinal_bytes.as_slice(),
+                detail.fingerprint.as_slice(),
+                source_discriminator.as_slice(),
                 signal_index_bytes.as_slice(),
                 channel.key.as_str().as_bytes(),
             ],
@@ -661,30 +798,642 @@ fn decode_brp_file(
         waveforms.push(WaveformSeries {
             source_key,
             channel_id,
-            start_time_unix_ms: normalize_millis(local_start_ms, clock)?,
+            start_time_unix_ms: normalize_millis(detail.local_start_ms, clock)?,
             sample_interval_ms,
             samples,
-            source_encoding: Some(EdfSourceEncoding {
-                digital_minimum: signal.header.digital_minimum,
-                digital_maximum: signal.header.digital_maximum,
-                physical_minimum: signal.header.physical_minimum,
-                physical_maximum: signal.header.physical_maximum,
-                samples_per_record,
-                record_duration_seconds: parsed.header().record_duration_seconds,
-            }),
+            source_encoding: Some(source_encoding),
         });
     }
 
     Ok((
-        Some(DecodedBrpFile {
-            local_start_ms,
-            local_end_ms,
-            fingerprint,
+        Some(DecodedDetailFile {
+            local_start_ms: detail.local_start_ms,
+            local_end_ms: detail.local_end_ms,
             waveforms,
             channels,
         }),
         warnings,
     ))
+}
+
+fn decode_oximetry_file(
+    source: &dyn ImportSource,
+    indexed_file: &ResmedSessionFile,
+    machine_serial: &str,
+    clock: &ImportClockContext,
+    statistics: &mut ImportStatistics,
+    import_budget: &mut DetailImportBudget,
+) -> Result<(Option<DecodedDetailFile>, Vec<ImportWarning>), ImportError> {
+    let registry_kind = match indexed_file.kind {
+        ResmedSessionFileKind::Sad => ResmedFileKind::Sad,
+        ResmedSessionFileKind::Sa2 => ResmedFileKind::Sa2,
+        _ => {
+            return Err(ImportError::new(
+                ImportErrorKind::InvalidData,
+                "non-oximetry file passed to the SAD/SA2 decoder",
+            )
+            .at_path(&indexed_file.relative_path));
+        }
+    };
+    let (detail, mut warnings) = read_detail_edf(
+        source,
+        indexed_file,
+        machine_serial,
+        statistics,
+        import_budget,
+    )?;
+    let Some(detail) = detail else {
+        return Ok((None, warnings));
+    };
+
+    let source_discriminator = source_basename_discriminator(indexed_file);
+    let normalized_file_start = normalize_millis(detail.local_start_ms, clock)?;
+    let mut waveforms = Vec::new();
+    let mut channels = Vec::new();
+    for (signal_index, signal) in detail.parsed.signals().iter().enumerate() {
+        let label = signal.header.label.trim();
+        if label.eq_ignore_ascii_case("Crc16") {
+            continue;
+        }
+        let Some(channel) = resmed_signal_prefix(registry_kind, label) else {
+            warnings.push(warning(
+                format!(
+                    "unknown_resmed_{}_signal",
+                    detail_kind_lowercase(indexed_file.kind)
+                ),
+                format!(
+                    "Unknown {} oximetry signal ignored: {label}",
+                    detail_kind_name(indexed_file.kind)
+                ),
+                Some(&indexed_file.relative_path),
+                None,
+            ));
+            continue;
+        };
+        if !matches!(
+            channel.key.as_str(),
+            PULSE_RATE_CHANNEL | OXYGEN_SATURATION_CHANNEL
+        ) {
+            warnings.push(warning(
+                format!(
+                    "invalid_resmed_{}_signal",
+                    detail_kind_lowercase(indexed_file.kind)
+                ),
+                format!(
+                    "{} signal {label} resolved outside the bounded oximetry channel set",
+                    detail_kind_name(indexed_file.kind)
+                ),
+                Some(&indexed_file.relative_path),
+                None,
+            ));
+            continue;
+        }
+        let Some((sample_interval_ms, source_encoding)) =
+            validated_signal_encoding(&detail.parsed, signal, label, indexed_file, &mut warnings)
+        else {
+            continue;
+        };
+        let Some(digital_samples) = signal.digital_samples() else {
+            warnings.push(warning(
+                format!(
+                    "invalid_resmed_{}_signal",
+                    detail_kind_lowercase(indexed_file.kind)
+                ),
+                format!(
+                    "{} signal {label} is not a digital sampled signal",
+                    detail_kind_name(indexed_file.kind)
+                ),
+                Some(&indexed_file.relative_path),
+                None,
+            ));
+            continue;
+        };
+        let physical = match signal.physical_samples() {
+            Ok(physical) => physical,
+            Err(error) => {
+                warnings.push(warning(
+                    format!(
+                        "invalid_resmed_{}_calibration",
+                        detail_kind_lowercase(indexed_file.kind)
+                    ),
+                    format!(
+                        "{} signal {label} has invalid EDF calibration: {error}",
+                        detail_kind_name(indexed_file.kind)
+                    ),
+                    Some(&indexed_file.relative_path),
+                    None,
+                ));
+                continue;
+            }
+        };
+
+        let mut output_samples = 0usize;
+        let mut output_segments = 0usize;
+        let mut in_segment = false;
+        let mut calibration_is_valid = true;
+        for (&digital, physical) in digital_samples.iter().zip(physical) {
+            if digital == -1 {
+                in_segment = false;
+                continue;
+            }
+            if !in_segment {
+                output_segments = output_segments.checked_add(1).ok_or_else(|| {
+                    aggregate_limit_error("oximetry output-segment arithmetic overflowed")
+                })?;
+                in_segment = true;
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let physical = physical as f32;
+            if !physical.is_finite() {
+                calibration_is_valid = false;
+                break;
+            }
+            output_samples = output_samples.checked_add(1).ok_or_else(|| {
+                aggregate_limit_error("oximetry output-sample arithmetic overflowed")
+            })?;
+        }
+        if !calibration_is_valid {
+            warnings.push(warning(
+                format!(
+                    "invalid_resmed_{}_calibration",
+                    detail_kind_lowercase(indexed_file.kind)
+                ),
+                format!(
+                    "{} signal {label} calibration produced a non-finite sample",
+                    detail_kind_name(indexed_file.kind)
+                ),
+                Some(&indexed_file.relative_path),
+                None,
+            ));
+            continue;
+        }
+        if output_samples == 0 {
+            continue;
+        }
+        import_budget.reserve_output(output_samples, output_segments)?;
+
+        let signal_index_bytes = u64::try_from(signal_index)
+            .unwrap_or(u64::MAX)
+            .to_be_bytes();
+        let mut segment_start_index = None;
+        let mut segment_samples = Vec::new();
+        let mut segment_ordinal = 0usize;
+        for (sample_index, (&digital, physical)) in digital_samples
+            .iter()
+            .zip(
+                signal
+                    .physical_samples()
+                    .expect("calibration was validated above"),
+            )
+            .enumerate()
+        {
+            if digital == -1 {
+                if let Some(start_index) = segment_start_index.take() {
+                    push_oximetry_segment(
+                        &mut waveforms,
+                        &mut segment_samples,
+                        indexed_file.kind,
+                        detail.fingerprint,
+                        source_discriminator,
+                        signal_index_bytes,
+                        segment_ordinal,
+                        start_index,
+                        normalized_file_start,
+                        sample_interval_ms,
+                        channel.key.as_str(),
+                        source_encoding,
+                    )?;
+                    segment_ordinal = segment_ordinal.saturating_add(1);
+                }
+                continue;
+            }
+            if segment_start_index.is_none() {
+                segment_start_index = Some(sample_index);
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            segment_samples.push(physical as f32);
+        }
+        if let Some(start_index) = segment_start_index {
+            push_oximetry_segment(
+                &mut waveforms,
+                &mut segment_samples,
+                indexed_file.kind,
+                detail.fingerprint,
+                source_discriminator,
+                signal_index_bytes,
+                segment_ordinal,
+                start_index,
+                normalized_file_start,
+                sample_interval_ms,
+                channel.key.as_str(),
+                source_encoding,
+            )?;
+        }
+
+        let unit = channel.unit.symbol();
+        channels.push(ChannelMetadata {
+            id: channel.key.as_str().to_owned(),
+            label: channel.label.to_owned(),
+            unit: (!unit.is_empty()).then(|| unit.to_owned()),
+            kind: ChannelKind::Waveform,
+        });
+    }
+
+    Ok((
+        Some(DecodedDetailFile {
+            local_start_ms: detail.local_start_ms,
+            local_end_ms: detail.local_end_ms,
+            waveforms,
+            channels,
+        }),
+        warnings,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_oximetry_segment(
+    waveforms: &mut Vec<WaveformSeries>,
+    samples: &mut Vec<f32>,
+    file_kind: ResmedSessionFileKind,
+    fingerprint: [u8; 32],
+    source_discriminator: [u8; 32],
+    signal_index_bytes: [u8; 8],
+    segment_ordinal: usize,
+    start_sample_index: usize,
+    normalized_file_start: i64,
+    sample_interval_ms: f64,
+    channel_id: &str,
+    source_encoding: EdfSourceEncoding,
+) -> Result<(), ImportError> {
+    if samples.is_empty() {
+        return Ok(());
+    }
+    let segment_ordinal_bytes = u64::try_from(segment_ordinal)
+        .unwrap_or(u64::MAX)
+        .to_be_bytes();
+    let start_sample_bytes = u64::try_from(start_sample_index)
+        .unwrap_or(u64::MAX)
+        .to_be_bytes();
+    let source_key = opaque_key(
+        oximetry_segment_key_domain(file_kind),
+        [
+            fingerprint.as_slice(),
+            source_discriminator.as_slice(),
+            signal_index_bytes.as_slice(),
+            segment_ordinal_bytes.as_slice(),
+            start_sample_bytes.as_slice(),
+            channel_id.as_bytes(),
+        ],
+    );
+    let start_offset_ms = sample_offset_millis(start_sample_index, sample_interval_ms)?;
+    let start_time_unix_ms = normalized_file_start
+        .checked_add(start_offset_ms)
+        .ok_or_else(|| {
+            ImportError::new(
+                ImportErrorKind::InvalidData,
+                "oximetry segment start exceeds the supported timestamp range",
+            )
+        })?;
+    waveforms.push(WaveformSeries {
+        source_key,
+        channel_id: channel_id.to_owned(),
+        start_time_unix_ms,
+        sample_interval_ms,
+        samples: std::mem::take(samples),
+        source_encoding: Some(source_encoding),
+    });
+    Ok(())
+}
+
+fn sample_offset_millis(sample_index: usize, sample_interval_ms: f64) -> Result<i64, ImportError> {
+    let sample_index = u32::try_from(sample_index).map_err(|_| {
+        ImportError::new(
+            ImportErrorKind::SizeLimitExceeded,
+            "oximetry sample index exceeds the supported range",
+        )
+    })?;
+    let offset = f64::from(sample_index) * sample_interval_ms;
+    if !offset.is_finite() || offset < 0.0 || offset > i64::MAX as f64 {
+        return Err(ImportError::new(
+            ImportErrorKind::InvalidData,
+            "oximetry sample cadence exceeds the supported timestamp range",
+        ));
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    Ok(offset.round() as i64)
+}
+
+fn read_detail_edf(
+    source: &dyn ImportSource,
+    indexed_file: &ResmedSessionFile,
+    machine_serial: &str,
+    statistics: &mut ImportStatistics,
+    import_budget: &mut DetailImportBudget,
+) -> Result<(Option<ParsedDetailEdf>, Vec<ImportWarning>), ImportError> {
+    let kind_name = detail_kind_name(indexed_file.kind);
+    let kind_lowercase = detail_kind_lowercase(indexed_file.kind);
+    if !is_decoded_detail_kind(indexed_file.kind) {
+        return Err(ImportError::new(
+            ImportErrorKind::InvalidData,
+            "unsupported file kind passed to the ResMed detail decoder",
+        )
+        .at_path(&indexed_file.relative_path));
+    }
+    if indexed_file
+        .relative_path
+        .to_ascii_lowercase()
+        .ends_with(".gz")
+    {
+        return Err(ImportError::new(
+            ImportErrorKind::UnsupportedOperation,
+            format!("compressed {kind_name} payloads are not supported"),
+        )
+        .at_path(&indexed_file.relative_path));
+    }
+    if indexed_file.size_bytes
+        > u64::try_from(RESMED_BRP_MAX_FILE_BYTES).expect("file budget fits u64")
+    {
+        return Err(ImportError::new(
+            ImportErrorKind::SizeLimitExceeded,
+            format!("{kind_name} file exceeds the {RESMED_BRP_MAX_FILE_BYTES}-byte import budget"),
+        )
+        .at_path(&indexed_file.relative_path));
+    }
+
+    let read_limit = import_budget.next_actual_read_limit()?;
+    let bytes = source.read_file(&indexed_file.relative_path, read_limit)?;
+    import_budget.charge_actual_bytes(bytes.len())?;
+    if bytes.len() > RESMED_BRP_MAX_FILE_BYTES {
+        return Err(ImportError::new(
+            ImportErrorKind::SizeLimitExceeded,
+            format!(
+                "source adapter returned {} bytes for a {kind_name} file, exceeding the {}-byte import budget",
+                bytes.len(),
+                RESMED_BRP_MAX_FILE_BYTES
+            ),
+        )
+        .at_path(&indexed_file.relative_path));
+    }
+    statistics.files_read = statistics.files_read.saturating_add(1);
+    statistics.bytes_read = statistics
+        .bytes_read
+        .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+    if u64::try_from(bytes.len()).ok() != Some(indexed_file.size_bytes) {
+        return Err(ImportError::new(
+            ImportErrorKind::InvalidData,
+            format!("{kind_name} file size changed after candidate indexing"),
+        )
+        .at_path(&indexed_file.relative_path));
+    }
+
+    let parsed = Parser::new(BRP_LIMITS).parse(&bytes).map_err(|source| {
+        ImportError::new(
+            ImportErrorKind::InvalidData,
+            format!("failed to decode complete {kind_name} EDF: {source}"),
+        )
+        .at_path(&indexed_file.relative_path)
+    })?;
+    let summary = indexed_file.edf_header.as_ref().ok_or_else(|| {
+        ImportError::new(
+            ImportErrorKind::InvalidData,
+            format!("candidate {kind_name} file has no indexed EDF header summary"),
+        )
+        .at_path(&indexed_file.relative_path)
+    })?;
+    validate_header_summary(parsed.header(), summary, kind_name).map_err(|message| {
+        ImportError::new(ImportErrorKind::InvalidData, message).at_path(&indexed_file.relative_path)
+    })?;
+    if parsed.header().is_discontinuous() {
+        return Err(ImportError::new(
+            ImportErrorKind::InvalidData,
+            format!("EDF+D {kind_name} files are discontinuous and are not supported"),
+        )
+        .at_path(&indexed_file.relative_path));
+    }
+
+    let mut warnings = Vec::new();
+    match recording_serial(&parsed.header().recording_id) {
+        Some(serial) if serial != machine_serial => {
+            warnings.push(warning(
+                format!("resmed_{kind_lowercase}_serial_mismatch"),
+                format!(
+                    "{kind_name} machine identity did not match the selected card; file skipped"
+                ),
+                Some(&indexed_file.relative_path),
+                None,
+            ));
+            return Ok((None, warnings));
+        }
+        Some(_) => {}
+        None => warnings.push(warning(
+            format!("resmed_{kind_lowercase}_serial_missing"),
+            format!(
+                "{kind_name} recording header has no SRN token; file imported without per-file identity verification"
+            ),
+            Some(&indexed_file.relative_path),
+            None,
+        )),
+    }
+
+    let local_start = device_local_from_resmed(&indexed_file.selected_start_time)?;
+    let local_start_ms = local_unix_millis(&local_start).map_err(invalid_source_clock)?;
+    let duration_ms = decoded_duration_millis(
+        parsed.record_count(),
+        parsed.header().record_duration_seconds,
+    )
+    .ok_or_else(|| {
+        ImportError::new(
+            ImportErrorKind::InvalidData,
+            format!("decoded {kind_name} duration is zero, non-finite, or outside timestamp range"),
+        )
+        .at_path(&indexed_file.relative_path)
+    })?;
+    let local_end_ms = local_start_ms.checked_add(duration_ms).ok_or_else(|| {
+        ImportError::new(
+            ImportErrorKind::InvalidData,
+            format!("decoded {kind_name} end time exceeds the supported calendar range"),
+        )
+        .at_path(&indexed_file.relative_path)
+    })?;
+    local_datetime_from_millis(local_end_ms).map_err(invalid_source_clock)?;
+
+    Ok((
+        Some(ParsedDetailEdf {
+            parsed,
+            local_start_ms,
+            local_end_ms,
+            fingerprint: sha256(&bytes),
+        }),
+        warnings,
+    ))
+}
+
+fn validated_signal_encoding(
+    parsed: &EdfFile,
+    signal: &Signal,
+    label: &str,
+    indexed_file: &ResmedSessionFile,
+    warnings: &mut Vec<ImportWarning>,
+) -> Option<(f64, EdfSourceEncoding)> {
+    let kind_name = detail_kind_name(indexed_file.kind);
+    let kind_lowercase = detail_kind_lowercase(indexed_file.kind);
+    if signal.header.samples_per_record == 0 {
+        warnings.push(warning(
+            format!("invalid_resmed_{kind_lowercase}_signal"),
+            format!("{kind_name} signal {label} has zero samples per record"),
+            Some(&indexed_file.relative_path),
+            None,
+        ));
+        return None;
+    }
+    let Ok(samples_per_record) = u32::try_from(signal.header.samples_per_record) else {
+        warnings.push(warning(
+            format!("invalid_resmed_{kind_lowercase}_signal"),
+            format!("{kind_name} signal {label} sample cadence exceeds the supported range"),
+            Some(&indexed_file.relative_path),
+            None,
+        ));
+        return None;
+    };
+    let sample_interval_ms =
+        parsed.header().record_duration_seconds * 1_000.0 / f64::from(samples_per_record);
+    if !sample_interval_ms.is_finite() || sample_interval_ms <= 0.0 {
+        warnings.push(warning(
+            format!("invalid_resmed_{kind_lowercase}_signal"),
+            format!("{kind_name} signal {label} has an invalid sampling interval"),
+            Some(&indexed_file.relative_path),
+            None,
+        ));
+        return None;
+    }
+    Some((
+        sample_interval_ms,
+        EdfSourceEncoding {
+            digital_minimum: signal.header.digital_minimum,
+            digital_maximum: signal.header.digital_maximum,
+            physical_minimum: signal.header.physical_minimum,
+            physical_maximum: signal.header.physical_maximum,
+            samples_per_record,
+            record_duration_seconds: parsed.header().record_duration_seconds,
+        },
+    ))
+}
+
+fn detail_kind_name(kind: ResmedSessionFileKind) -> &'static str {
+    match kind {
+        ResmedSessionFileKind::Brp => "BRP",
+        ResmedSessionFileKind::Sad => "SAD",
+        ResmedSessionFileKind::Sa2 => "SA2",
+        _ => "ResMed detail",
+    }
+}
+
+fn detail_kind_lowercase(kind: ResmedSessionFileKind) -> &'static str {
+    match kind {
+        ResmedSessionFileKind::Brp => "brp",
+        ResmedSessionFileKind::Sad => "sad",
+        ResmedSessionFileKind::Sa2 => "sa2",
+        _ => "detail",
+    }
+}
+
+fn oximetry_segment_key_domain(kind: ResmedSessionFileKind) -> &'static str {
+    match kind {
+        ResmedSessionFileKind::Sad => "opap/resmed/sad-waveform-segment/v1",
+        ResmedSessionFileKind::Sa2 => "opap/resmed/sa2-waveform-segment/v1",
+        _ => "opap/resmed/invalid-oximetry-waveform-segment/v1",
+    }
+}
+
+fn source_basename_discriminator(file: &ResmedSessionFile) -> [u8; 32] {
+    let basename = file
+        .relative_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(file.relative_path.as_str());
+    sha256(basename.as_bytes())
+}
+
+fn covered_duration_millis(intervals: &mut [(i64, i64)]) -> Result<u64, ImportError> {
+    intervals.sort_unstable();
+    let Some(&(mut current_start, mut current_end)) = intervals.first() else {
+        return Ok(0);
+    };
+    if current_end <= current_start {
+        return Err(ImportError::new(
+            ImportErrorKind::InvalidData,
+            "decoded BRP coverage contains an empty or reversed interval",
+        ));
+    }
+    let mut total = 0u64;
+    for &(start, end) in &intervals[1..] {
+        if end <= start {
+            return Err(ImportError::new(
+                ImportErrorKind::InvalidData,
+                "decoded BRP coverage contains an empty or reversed interval",
+            ));
+        }
+        if start <= current_end {
+            current_end = current_end.max(end);
+            continue;
+        }
+        total = total
+            .checked_add(u64::try_from(current_end - current_start).map_err(|_| {
+                ImportError::new(
+                    ImportErrorKind::InvalidData,
+                    "decoded BRP coverage duration is outside the supported range",
+                )
+            })?)
+            .ok_or_else(|| {
+                ImportError::new(
+                    ImportErrorKind::InvalidData,
+                    "decoded BRP coverage duration overflowed",
+                )
+            })?;
+        current_start = start;
+        current_end = end;
+    }
+    total
+        .checked_add(u64::try_from(current_end - current_start).map_err(|_| {
+            ImportError::new(
+                ImportErrorKind::InvalidData,
+                "decoded BRP coverage duration is outside the supported range",
+            )
+        })?)
+        .ok_or_else(|| {
+            ImportError::new(
+                ImportErrorKind::InvalidData,
+                "decoded BRP coverage duration overflowed",
+            )
+        })
+}
+
+/// Provisional logical identity for BRP-backed partial sessions.
+///
+/// Payload fingerprints deliberately stay out of this key so authoritative
+/// replacement can update changed children without duplicating the logical
+/// session. The STR mask-on identity should supersede this anchor before the
+/// native import executor is enabled.
+fn logical_brp_session_source_key(
+    candidate: &ResmedSessionCandidate,
+    brp_files: &[(&ResmedSessionFile, DecodedDetailFile)],
+    anchor_start_ms: i64,
+) -> String {
+    let anchor_start_bytes = anchor_start_ms.to_be_bytes();
+    let anchor_basename = brp_files
+        .iter()
+        .filter(|(_, decoded)| decoded.local_start_ms == anchor_start_ms)
+        .filter_map(|(file, _)| file.relative_path.rsplit('/').next())
+        .min()
+        .expect("decoded BRP anchor has a source basename");
+    opaque_key(
+        "opap/resmed/brp-session-source/v2",
+        [
+            candidate.resmed_day.as_bytes(),
+            anchor_start_bytes.as_slice(),
+            anchor_basename.as_bytes(),
+        ],
+    )
 }
 
 fn recording_serial(recording_id: &str) -> Option<&str> {
@@ -697,7 +1446,8 @@ fn recording_serial(recording_id: &str) -> Option<&str> {
 fn validate_header_summary(
     header: &EdfHeader,
     summary: &ResmedEdfHeaderSummary,
-) -> Result<(), &'static str> {
+    kind_name: &str,
+) -> Result<(), String> {
     if u64::try_from(header.header_bytes).ok() != Some(summary.header_bytes)
         || u16::try_from(header.signals.len()).ok() != Some(summary.signal_count)
         || header
@@ -706,7 +1456,9 @@ fn validate_header_summary(
             != summary.declared_record_count
         || header.record_duration_seconds.to_bits() != summary.record_duration_seconds.to_bits()
     {
-        return Err("complete BRP header no longer matches its indexed summary");
+        return Err(format!(
+            "complete {kind_name} header no longer matches its indexed summary"
+        ));
     }
     if let Some(indexed_start) = &summary.start_time {
         let start = &header.start;
@@ -722,7 +1474,9 @@ fn validate_header_summary(
             || start.minute != indexed_start.minute
             || start.second != indexed_start.second
         {
-            return Err("complete BRP start time no longer matches its indexed summary");
+            return Err(format!(
+                "complete {kind_name} start time no longer matches its indexed summary"
+            ));
         }
     }
     Ok(())
@@ -733,16 +1487,49 @@ fn candidate_ends_at_or_before(
     cutoff: i64,
     clock: &ImportClockContext,
 ) -> bool {
-    let Some(estimated_end) = &candidate.estimated_end_time else {
-        return false;
-    };
-    let Ok(device_local) = device_local_from_resmed(estimated_end) else {
-        return false;
-    };
-    let Ok(local_millis) = local_unix_millis(&device_local) else {
-        return false;
-    };
-    normalize_millis(local_millis, clock).is_ok_and(|end| end <= cutoff)
+    let mut saw_brp = false;
+    let mut latest_upper_bound = i64::MIN;
+    for file in candidate
+        .files
+        .iter()
+        .filter(|file| is_decoded_detail_kind(file.kind))
+    {
+        saw_brp |= file.kind == ResmedSessionFileKind::Brp;
+        let Some(summary) = &file.edf_header else {
+            return false;
+        };
+        let Some(record_count) = summary.declared_record_count else {
+            // The full parser can infer records from payload bytes. A
+            // point-attached SAD/SA2 therefore has no proven indexed end.
+            return false;
+        };
+        let Ok(record_count) = u32::try_from(record_count) else {
+            return false;
+        };
+        let duration_ms = f64::from(record_count) * summary.record_duration_seconds * 1_000.0;
+        if !duration_ms.is_finite() || duration_ms <= 0.0 || duration_ms > i64::MAX as f64 {
+            return false;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let duration_upper_bound_ms = duration_ms.ceil() as i64;
+        let Ok(device_local) = device_local_from_resmed(&file.selected_start_time) else {
+            return false;
+        };
+        let Ok(local_start_ms) = local_unix_millis(&device_local) else {
+            return false;
+        };
+        let Some(local_end_ms) = local_start_ms.checked_add(duration_upper_bound_ms) else {
+            return false;
+        };
+        latest_upper_bound = latest_upper_bound.max(local_end_ms);
+    }
+    // Any mutation to the complete start/count/duration header fields is
+    // rejected by `validate_header_summary` if decoded. This ceiling is
+    // therefore a conservative upper bound for every otherwise-accepted
+    // decoded detail payload.
+    saw_brp
+        && latest_upper_bound != i64::MIN
+        && normalize_millis(latest_upper_bound, clock).is_ok_and(|end| end <= cutoff)
 }
 
 fn decoded_duration_millis(record_count: usize, record_duration_seconds: f64) -> Option<i64> {
@@ -753,29 +1540,6 @@ fn decoded_duration_millis(record_count: usize, record_duration_seconds: f64) ->
     }
     #[allow(clippy::cast_possible_truncation)]
     Some(millis.round() as i64)
-}
-
-fn session_source_key(
-    therapy_day: &str,
-    local_start_ms: i64,
-    local_end_ms: i64,
-    file_fingerprints: &[Vec<u8>],
-    waveforms: &[WaveformSeries],
-) -> String {
-    let mut parts = Vec::with_capacity(file_fingerprints.len() + waveforms.len() + 3);
-    parts.push(therapy_day.as_bytes().to_vec());
-    parts.push(local_start_ms.to_be_bytes().to_vec());
-    parts.push(local_end_ms.to_be_bytes().to_vec());
-    parts.extend(file_fingerprints.iter().cloned());
-    parts.extend(
-        waveforms
-            .iter()
-            .map(|waveform| waveform.source_key.as_bytes().to_vec()),
-    );
-    opaque_key(
-        "opap/resmed/session-source/v1",
-        parts.iter().map(Vec::as_slice),
-    )
 }
 
 fn opaque_key<'a>(domain: &str, parts: impl IntoIterator<Item = &'a [u8]>) -> String {
@@ -819,6 +1583,16 @@ fn validate_clock_context(clock: &ImportClockContext) -> Result<(), ImportError>
         return Err(ImportError::new(
             ImportErrorKind::InvalidConfiguration,
             "timezone_basis must be non-empty when supplied",
+        ));
+    }
+    if clock
+        .timezone_basis
+        .as_ref()
+        .is_some_and(|basis| basis.len() > MAX_TIMEZONE_BASIS_BYTES)
+    {
+        return Err(ImportError::new(
+            ImportErrorKind::InvalidConfiguration,
+            format!("timezone_basis must be at most {MAX_TIMEZONE_BASIS_BYTES} UTF-8 bytes"),
         ));
     }
 
@@ -1111,6 +1885,32 @@ mod tests {
         }
     }
 
+    struct LimitIgnoringSource {
+        bytes: Vec<u8>,
+    }
+
+    impl ImportSource for LimitIgnoringSource {
+        fn inventory(&self) -> Result<SourceInventory, ImportError> {
+            Ok(SourceInventory::default())
+        }
+
+        fn read_file(
+            &self,
+            _relative_path: &str,
+            _max_bytes: usize,
+        ) -> Result<Vec<u8>, ImportError> {
+            Ok(self.bytes.clone())
+        }
+
+        fn read_file_prefix(
+            &self,
+            _relative_path: &str,
+            max_bytes: usize,
+        ) -> Result<Vec<u8>, ImportError> {
+            Ok(self.bytes[..self.bytes.len().min(max_bytes)].to_vec())
+        }
+    }
+
     #[derive(Clone)]
     struct SignalFixture<'a> {
         label: &'a str,
@@ -1178,12 +1978,29 @@ mod tests {
         record_duration: &str,
         recording_id: &str,
     ) -> Vec<u8> {
+        synthetic_detail_with_start(
+            signals,
+            record_count,
+            record_duration,
+            recording_id,
+            "02.01.2622.00.00",
+        )
+    }
+
+    fn synthetic_detail_with_start(
+        signals: &[SignalFixture<'_>],
+        record_count: usize,
+        record_duration: &str,
+        recording_id: &str,
+        start: &str,
+    ) -> Vec<u8> {
+        assert_eq!(start.len(), 16);
         let header_bytes = 256 + signals.len() * 256;
         let mut bytes = Vec::new();
         bytes.extend(field("0", 8));
         bytes.extend(field("patient", 80));
         bytes.extend(field(recording_id, 80));
-        bytes.extend_from_slice(b"02.01.2622.00.00");
+        bytes.extend_from_slice(start.as_bytes());
         bytes.extend(field(&header_bytes.to_string(), 8));
         bytes.extend(field("", 44));
         bytes.extend(field(&record_count.to_string(), 8));
@@ -1247,6 +2064,32 @@ mod tests {
         );
         source.insert("DATALOG/20260102_220000_BRP.edf", bytes);
         source
+    }
+
+    fn card_with_detail_files(
+        files: impl IntoIterator<Item = (&'static str, Vec<u8>)>,
+    ) -> MemorySource {
+        let mut source = MemorySource::default();
+        source.insert("STR.edf", b"signature only".to_vec());
+        source.insert(
+            "Identification.tgt",
+            b"#SRN serial-123\n#PNA AirSense_10_AutoSet\n#PCD 37028\n".to_vec(),
+        );
+        for (path, bytes) in files {
+            source.insert(path, bytes);
+        }
+        source
+    }
+
+    fn simple_oximetry() -> Vec<u8> {
+        synthetic_brp(
+            &[
+                SignalFixture::new("Pulse.1s", 2, &[0, 50, 100, 25]).calibration(40, 140, 0, 100),
+                SignalFixture::new("SpO2", 1, &[0, 10]).calibration(80, 100, 0, 10),
+            ],
+            2,
+            "1",
+        )
     }
 
     fn budget_file(size_bytes: u64) -> ResmedSessionFile {
@@ -1411,6 +2254,442 @@ mod tests {
     }
 
     #[test]
+    fn sad_and_sa2_share_calibrated_channels_but_keep_distinct_segment_provenance() {
+        let import = |suffix: &str| {
+            let path = match suffix {
+                "SAD" => "DATALOG/20260102_220000_SAD.edf",
+                "SA2" => "DATALOG/20260102_220000_SA2.edf",
+                _ => unreachable!("fixture suffix"),
+            };
+            import_resmed_sessions(
+                &card_with_detail_files([
+                    ("DATALOG/20260102_220000_BRP.edf", simple_flow()),
+                    (path, simple_oximetry()),
+                ]),
+                &options(),
+            )
+            .expect("import BRP-backed oximetry")
+        };
+        let sad = import("SAD");
+        let sa2 = import("SA2");
+        let sad_session = &sad.sessions[0];
+        let sa2_session = &sa2.sessions[0];
+        assert_eq!(
+            sad_session.source_key,
+            "sha256:27bfc3cf634bdd1738c9dbd06f67be0e43a40f321c90e7a48f48ba980b647e1e"
+        );
+        assert_eq!(
+            sad_session.id,
+            "sha256:aded1b2399bd8ff4e0ec15cdcb27aeff59fe05b9da0f551d04a02598a955405f"
+        );
+        assert_eq!(
+            sad_session
+                .waveforms
+                .iter()
+                .find(|series| series.channel_id == FLOW_RATE_CHANNEL)
+                .expect("BRP series")
+                .source_key,
+            "sha256:6253d7661ecd51dccb58141797ea27a0a4f6a763c48531266c96e1037f90daf1"
+        );
+
+        assert_eq!(sad_session.id, sa2_session.id);
+        assert_eq!(sad_session.source_key, sa2_session.source_key);
+        fn series<'a>(session: &'a Session, channel_id: &str) -> &'a WaveformSeries {
+            session
+                .waveforms
+                .iter()
+                .find(|series| series.channel_id == channel_id)
+                .expect("oximetry series")
+        }
+        let sad_pulse = series(sad_session, PULSE_RATE_CHANNEL);
+        let sa2_pulse = series(sa2_session, PULSE_RATE_CHANNEL);
+        assert_eq!(sad_pulse.samples, vec![40.0, 90.0, 140.0, 65.0]);
+        assert_eq!(sad_pulse.samples, sa2_pulse.samples);
+        assert_eq!(sad_pulse.sample_interval_ms, 500.0);
+        assert_eq!(sad_pulse.source_encoding, sa2_pulse.source_encoding);
+        assert_eq!(
+            sad_pulse.source_key,
+            "sha256:f94af2f5286f02f52fc5bfa08c1ebd7fac6d9a88eb2d36d933ffc303995bb416"
+        );
+        assert_eq!(
+            sa2_pulse.source_key,
+            "sha256:d523e06e78089c410632a6bf570e2cfc2325ca885c2f98589571bdb35fe8538e"
+        );
+
+        let sad_spo2 = series(sad_session, OXYGEN_SATURATION_CHANNEL);
+        let sa2_spo2 = series(sa2_session, OXYGEN_SATURATION_CHANNEL);
+        assert_eq!(sad_spo2.samples, vec![80.0, 100.0]);
+        assert_eq!(sad_spo2.samples, sa2_spo2.samples);
+        assert_eq!(sad_spo2.sample_interval_ms, 1_000.0);
+        assert_eq!(
+            sad_spo2.source_encoding,
+            Some(EdfSourceEncoding {
+                digital_minimum: 0,
+                digital_maximum: 10,
+                physical_minimum: 80.0,
+                physical_maximum: 100.0,
+                samples_per_record: 1,
+                record_duration_seconds: 1.0,
+            })
+        );
+        assert_ne!(sad_spo2.source_key, sa2_spo2.source_key);
+        for key in [
+            &sad_pulse.source_key,
+            &sa2_pulse.source_key,
+            &sad_spo2.source_key,
+            &sa2_spo2.source_key,
+        ] {
+            assert!(key.starts_with("sha256:"));
+            assert_eq!(key.len(), 71);
+            assert!(!key.contains("DATALOG"));
+            assert!(!key.contains("serial-123"));
+        }
+    }
+
+    #[test]
+    fn oximetry_missing_sentinel_splits_leading_interior_and_trailing_gaps() {
+        let oximetry = synthetic_brp(
+            &[
+                SignalFixture::new("Pulse", 8, &[-1, 20, 30, -1, 40, 50, -1, -1]),
+                SignalFixture::new("SpO2", 8, &[-1; 8]),
+                SignalFixture::new("Crc16", 8, &[0; 8]),
+                SignalFixture::new("vendor mystery", 8, &[1; 8]),
+            ],
+            1,
+            "8",
+        );
+        let report = import_resmed_sessions(
+            &card_with_detail_files([
+                ("DATALOG/20260102_220000_BRP.edf", simple_flow()),
+                ("DATALOG/20260102_220000_SAD.edf", oximetry),
+            ]),
+            &options(),
+        )
+        .expect("split missing oximetry samples");
+        let session = &report.sessions[0];
+        let segments: Vec<_> = session
+            .waveforms
+            .iter()
+            .filter(|series| series.channel_id == PULSE_RATE_CHANNEL)
+            .collect();
+        assert_eq!(segments.len(), 2);
+        let file_start = session
+            .waveforms
+            .iter()
+            .find(|series| series.channel_id == FLOW_RATE_CHANNEL)
+            .expect("BRP anchor")
+            .start_time_unix_ms;
+        assert_eq!(segments[0].start_time_unix_ms, file_start + 1_000);
+        assert_eq!(segments[0].samples, vec![20.0, 30.0]);
+        assert_eq!(segments[1].start_time_unix_ms, file_start + 4_000);
+        assert_eq!(segments[1].samples, vec![40.0, 50.0]);
+        assert!(
+            session
+                .waveforms
+                .iter()
+                .all(|series| series.channel_id != OXYGEN_SATURATION_CHANNEL)
+        );
+        assert!(
+            session
+                .channels
+                .iter()
+                .all(|channel| channel.id != OXYGEN_SATURATION_CHANNEL)
+        );
+        assert_eq!(session.summary.usage_ms, 2_000);
+        assert_eq!(
+            session.end_time.normalized_utc_unix_ms - session.start_time.normalized_utc_unix_ms,
+            8_000
+        );
+        assert_eq!(
+            report
+                .warnings
+                .iter()
+                .filter(|warning| warning.code == "unknown_resmed_sad_signal")
+                .count(),
+            1
+        );
+        assert!(report.warnings.iter().all(|warning| {
+            warning.code != "unknown_resmed_sad_signal" || !warning.message.contains("Crc16")
+        }));
+    }
+
+    #[test]
+    fn attached_oximetry_expands_the_envelope_without_inflating_brp_usage() {
+        let oximetry = synthetic_detail_with_start(
+            &[SignalFixture::new("Pulse", 4, &[60, 61, 62, 63])],
+            1,
+            "4",
+            "ResMed SRN=serial-123",
+            "02.01.2621.59.59",
+        );
+        let report = import_resmed_sessions(
+            &card_with_detail_files([
+                ("DATALOG/20260102_220000_BRP.edf", simple_flow()),
+                ("DATALOG/20260102_215959_SAD.edf", oximetry),
+            ]),
+            &options(),
+        )
+        .expect("attach overlapping oximetry");
+        let session = &report.sessions[0];
+
+        assert_eq!(
+            session.start_time.device_local_wall_time,
+            "2026-01-02T21:59:59.000"
+        );
+        assert_eq!(
+            session.end_time.device_local_wall_time,
+            "2026-01-02T22:00:03.000"
+        );
+        assert_eq!(session.summary.usage_ms, 2_000);
+        assert_eq!(
+            session.end_time.normalized_utc_unix_ms - session.start_time.normalized_utc_unix_ms,
+            4_000
+        );
+    }
+
+    #[test]
+    fn malformed_sad_warns_without_discarding_valid_brp() {
+        let mut malformed = simple_oximetry();
+        malformed.pop();
+        let report = import_resmed_sessions(
+            &card_with_detail_files([
+                ("DATALOG/20260102_220000_BRP.edf", simple_flow()),
+                ("DATALOG/20260102_220000_SAD.edf", malformed),
+            ]),
+            &options(),
+        )
+        .expect("malformed oximetry remains non-fatal");
+
+        assert_eq!(report.sessions.len(), 1);
+        assert_eq!(report.sessions[0].waveforms.len(), 1);
+        let warning = report
+            .warnings
+            .iter()
+            .find(|warning| warning.code == "resmed_sad_not_decoded")
+            .expect("stable SAD diagnostic");
+        assert_eq!(
+            warning.session_id.as_deref(),
+            Some(report.sessions[0].id.as_str())
+        );
+    }
+
+    #[test]
+    fn mismatched_sad_serial_is_private_and_does_not_discard_valid_brp() {
+        let oximetry = synthetic_brp_with_recording_id(
+            &[SignalFixture::new("Pulse", 1, &[60, 61])],
+            2,
+            "1",
+            "ResMed SRN=another-secret",
+        );
+        let report = import_resmed_sessions(
+            &card_with_detail_files([
+                ("DATALOG/20260102_220000_BRP.edf", simple_flow()),
+                ("DATALOG/20260102_220000_SAD.edf", oximetry),
+            ]),
+            &options(),
+        )
+        .expect("identity mismatch remains a per-file diagnostic");
+
+        assert_eq!(report.sessions.len(), 1);
+        assert_eq!(report.sessions[0].waveforms.len(), 1);
+        let mismatch = report
+            .warnings
+            .iter()
+            .find(|warning| warning.code == "resmed_sad_serial_mismatch")
+            .expect("stable mismatch warning");
+        assert_eq!(
+            mismatch.session_id.as_deref(),
+            Some(report.sessions[0].id.as_str())
+        );
+        assert!(report.warnings.iter().all(|warning| {
+            !warning.message.contains("serial-123") && !warning.message.contains("another-secret")
+        }));
+    }
+
+    #[test]
+    fn sad_without_valid_brp_never_creates_a_pap_session_or_reads_payload() {
+        const SAD_PATH: &str = "DATALOG/20260102_220000_SAD.edf";
+        let source = card_with_detail_files([(SAD_PATH, simple_oximetry())]);
+        let report =
+            import_resmed_sessions(&source, &options()).expect("SAD-only candidate is non-fatal");
+
+        assert!(report.sessions.is_empty());
+        assert_eq!(report.statistics.sessions_imported, 0);
+        assert_eq!(source.full_read_count(SAD_PATH), 0);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "resmed_candidate_not_imported")
+        );
+    }
+
+    #[test]
+    fn oversized_sad_only_candidate_cannot_abort_a_later_valid_brp_session() {
+        const SAD_PATH: &str = "DATALOG/20260101_220000_SAD.edf";
+        const BRP_PATH: &str = "DATALOG/20260102_220000_BRP.edf";
+        let mut old_sad = simple_oximetry();
+        old_sad[168..184].copy_from_slice(b"01.01.2622.00.00");
+        let mut source = card_with_detail_files([(SAD_PATH, old_sad), (BRP_PATH, simple_flow())]);
+        source
+            .inventory
+            .entries
+            .iter_mut()
+            .find(|entry| entry.relative_path == SAD_PATH)
+            .expect("SAD inventory entry")
+            .size_bytes = RESMED_BRP_MAX_TOTAL_BYTES_PER_IMPORT + 1;
+
+        let report = import_resmed_sessions(&source, &options())
+            .expect("unanchored optional oximetry is excluded from fatal budgets");
+        assert_eq!(report.sessions.len(), 1);
+        assert_eq!(report.sessions[0].therapy_day, "2026-01-02");
+        assert_eq!(source.full_read_count(SAD_PATH), 0);
+        assert_eq!(source.full_read_count(BRP_PATH), 1);
+    }
+
+    #[test]
+    fn oversized_early_attached_sad_does_not_starve_later_brp_decoding() {
+        const EARLY_BRP_PATH: &str = "DATALOG/20260101_220000_BRP.edf";
+        const EARLY_SAD_PATH: &str = "DATALOG/20260101_220000_SAD.edf";
+        const LATER_BRP_PATH: &str = "DATALOG/20260102_220000_BRP.edf";
+        let mut early_brp = simple_flow();
+        early_brp[168..184].copy_from_slice(b"01.01.2622.00.00");
+        let mut early_sad = simple_oximetry();
+        early_sad[168..184].copy_from_slice(b"01.01.2622.00.00");
+        let mut source = card_with_detail_files([
+            (EARLY_BRP_PATH, early_brp),
+            (EARLY_SAD_PATH, early_sad),
+            (LATER_BRP_PATH, simple_flow()),
+        ]);
+        source
+            .inventory
+            .entries
+            .iter_mut()
+            .find(|entry| entry.relative_path == EARLY_SAD_PATH)
+            .expect("SAD inventory entry")
+            .size_bytes = RESMED_BRP_MAX_TOTAL_BYTES_PER_IMPORT + 1;
+
+        let report = import_resmed_sessions(&source, &options())
+            .expect("all BRP anchors decode before best-effort oximetry");
+        assert_eq!(report.sessions.len(), 2);
+        assert_eq!(source.full_read_count(EARLY_BRP_PATH), 1);
+        assert_eq!(source.full_read_count(LATER_BRP_PATH), 1);
+        assert_eq!(source.full_read_count(EARLY_SAD_PATH), 0);
+        let warning = report
+            .warnings
+            .iter()
+            .find(|warning| warning.code == "resmed_sad_not_decoded")
+            .expect("oversized optional SAD warning");
+        assert!(warning.session_id.is_some());
+    }
+
+    #[test]
+    fn compressed_oximetry_is_explicitly_unsupported_without_hiding_brp() {
+        const COMPRESSED_PATH: &str = "DATALOG/20260102_220000_SAD.edf.gz";
+        let source = card_with_detail_files([
+            ("DATALOG/20260102_220000_BRP.edf", simple_flow()),
+            (COMPRESSED_PATH, simple_oximetry()),
+        ]);
+        let report = import_resmed_sessions(&source, &options())
+            .expect("compressed oximetry remains a non-fatal indexing gap");
+
+        assert_eq!(report.sessions.len(), 1);
+        assert_eq!(report.sessions[0].waveforms.len(), 1);
+        assert_eq!(source.full_read_count(COMPRESSED_PATH), 0);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "compressed_edf_not_indexed")
+        );
+    }
+
+    #[test]
+    fn sad_complete_header_revalidation_applies_resmed_century_repair() {
+        let mut oximetry = simple_oximetry();
+        oximetry[168..184].copy_from_slice(b"02.01.8522.00.00");
+        let report = import_resmed_sessions(
+            &card_with_detail_files([
+                ("DATALOG/20260102_220000_BRP.edf", simple_flow()),
+                ("DATALOG/20260102_220000_SAD.edf", oximetry),
+            ]),
+            &options(),
+        )
+        .expect("ResMed year 85 is revalidated consistently");
+
+        assert!(
+            report.sessions[0]
+                .waveforms
+                .iter()
+                .any(|series| series.channel_id == PULSE_RATE_CHANNEL)
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "edf_header_time_in_future")
+        );
+    }
+
+    #[test]
+    fn logical_brp_identity_survives_corrected_content_while_child_identity_changes() {
+        let first = card_with_brp(simple_flow());
+        let corrected = synthetic_brp(
+            &[SignalFixture::new("Flow", 2, &[-100, 0, 25, 100]).calibration(-4, 4, -100, 100)],
+            2,
+            "1",
+        );
+        let second = card_with_brp(corrected);
+        let first_report = import_resmed_sessions(&first, &options()).expect("first import");
+        let second_report = import_resmed_sessions(&second, &options()).expect("corrected import");
+        let first_session = &first_report.sessions[0];
+        let second_session = &second_report.sessions[0];
+
+        assert_eq!(first_session.id, second_session.id);
+        assert_eq!(first_session.source_key, second_session.source_key);
+        assert_ne!(
+            first_session.waveforms[0].source_key,
+            second_session.waveforms[0].source_key
+        );
+        assert_ne!(
+            first_session.waveforms[0].samples,
+            second_session.waveforms[0].samples
+        );
+    }
+
+    #[test]
+    fn logical_brp_identity_distinguishes_same_anchor_time_with_different_basenames() {
+        let flow_at = |path| {
+            card_with_detail_files([(
+                path,
+                synthetic_detail_with_start(
+                    &[SignalFixture::new("Flow", 1, &[0, 1])],
+                    2,
+                    "1",
+                    "ResMed SRN=serial-123",
+                    "02.01.2612.30.00",
+                ),
+            )])
+        };
+        let first = import_resmed_sessions(&flow_at("DATALOG/20260102_120000_BRP.edf"), &options())
+            .expect("first basename");
+        let second =
+            import_resmed_sessions(&flow_at("DATALOG/20260102_130000_BRP.edf"), &options())
+                .expect("second basename");
+
+        assert_eq!(
+            first.sessions[0].start_time.normalized_utc_unix_ms,
+            second.sessions[0].start_time.normalized_utc_unix_ms
+        );
+        assert_eq!(
+            first.sessions[0].therapy_day,
+            second.sessions[0].therapy_day
+        );
+        assert_ne!(first.sessions[0].source_key, second.sessions[0].source_key);
+        assert_ne!(first.sessions[0].id, second.sessions[0].id);
+    }
+
+    #[test]
     fn preserves_duplicate_registered_signals_with_distinct_opaque_keys() {
         let signals = [
             SignalFixture::new("Flow", 1, &[0, 10]),
@@ -1491,23 +2770,19 @@ mod tests {
     }
 
     #[test]
-    fn cutoff_prefilter_skips_known_old_end_before_budgeting_or_payload_read() {
+    fn cutoff_prefilter_uses_a_proven_upper_bound_for_all_decoded_details() {
         const OLD_PATH: &str = "DATALOG/20260101_220000_BRP.edf";
+        const OLD_SAD_PATH: &str = "DATALOG/20260101_220000_SAD.edf";
         const ACTIVE_PATH: &str = "DATALOG/20260102_220000_BRP.edf";
 
         let active = simple_flow();
-        let active_bytes = u64::try_from(active.len()).expect("fixture length fits u64");
         let mut old = simple_flow();
         old[168..184].copy_from_slice(b"01.01.2622.00.00");
         let mut source = card_with_brp(active);
         source.insert(OLD_PATH, old);
-        source
-            .inventory
-            .entries
-            .iter_mut()
-            .find(|entry| entry.relative_path == OLD_PATH)
-            .expect("old inventory entry")
-            .size_bytes = RESMED_BRP_MAX_TOTAL_BYTES_PER_IMPORT + 1;
+        let mut old_sad = simple_oximetry();
+        old_sad[168..184].copy_from_slice(b"01.01.2622.00.00");
+        source.insert(OLD_SAD_PATH, old_sad);
 
         let clock_context = clock();
         let old_end = DeviceLocalDateTime {
@@ -1528,13 +2803,86 @@ mod tests {
         import_options.sessions_not_before_unix_ms = Some(cutoff);
 
         let report = import_resmed_sessions(&source, &import_options)
-            .expect("old candidate is filtered before aggregate preflight");
+            .expect("known upper bound permits a no-read cutoff");
 
         assert_eq!(report.sessions.len(), 1);
         assert_eq!(report.statistics.sessions_skipped, 1);
-        assert_eq!(report.statistics.bytes_read, active_bytes);
         assert_eq!(source.full_read_count(OLD_PATH), 0);
+        assert_eq!(source.full_read_count(OLD_SAD_PATH), 0);
         assert_eq!(source.full_read_count(ACTIVE_PATH), 1);
+    }
+
+    #[test]
+    fn fractional_brp_end_survives_cutoff_at_the_index_truncated_second() {
+        let source = card_with_brp(synthetic_brp(
+            &[SignalFixture::new("Flow", 1, &[0])],
+            1,
+            "1.5",
+        ));
+        let start = DeviceLocalDateTime {
+            year: 2026,
+            month: 1,
+            day: 2,
+            hour: 22,
+            minute: 0,
+            second: 0,
+            millisecond: 0,
+        };
+        let cutoff = normalize_millis(
+            local_unix_millis(&start).expect("valid fixture start") + 1_000,
+            &clock(),
+        )
+        .expect("normalize cutoff");
+        let mut import_options = options();
+        import_options.sessions_not_before_unix_ms = Some(cutoff);
+
+        let report =
+            import_resmed_sessions(&source, &import_options).expect("fractional BRP import");
+        assert_eq!(report.sessions.len(), 1);
+        assert_eq!(
+            report.sessions[0].end_time.normalized_utc_unix_ms,
+            cutoff + 500
+        );
+        assert_eq!(report.statistics.sessions_skipped, 0);
+    }
+
+    #[test]
+    fn fractional_and_unknown_count_sad_envelopes_survive_brp_end_cutoff() {
+        let brp = synthetic_brp(&[SignalFixture::new("Flow", 1, &[0])], 1, "1");
+        let known_fractional = synthetic_brp(&[SignalFixture::new("Pulse", 1, &[60])], 1, "1.5");
+        let mut unknown_count = synthetic_brp(&[SignalFixture::new("Pulse", 1, &[60, 61])], 2, "1");
+        unknown_count[236..244].copy_from_slice(&field("-1", 8));
+
+        let start = DeviceLocalDateTime {
+            year: 2026,
+            month: 1,
+            day: 2,
+            hour: 22,
+            minute: 0,
+            second: 0,
+            millisecond: 0,
+        };
+        let cutoff = normalize_millis(
+            local_unix_millis(&start).expect("valid fixture start") + 1_000,
+            &clock(),
+        )
+        .expect("normalize cutoff");
+        for (sad, expected_extra_ms) in [(known_fractional, 500), (unknown_count, 1_000)] {
+            let source = card_with_detail_files([
+                ("DATALOG/20260102_220000_BRP.edf", brp.clone()),
+                ("DATALOG/20260102_220000_SAD.edf", sad),
+            ]);
+            let mut import_options = options();
+            import_options.sessions_not_before_unix_ms = Some(cutoff);
+            let report = import_resmed_sessions(&source, &import_options)
+                .expect("SAD envelope is decoded before cutoff");
+            assert_eq!(report.sessions.len(), 1);
+            assert_eq!(
+                report.sessions[0].end_time.normalized_utc_unix_ms,
+                cutoff + expected_extra_ms
+            );
+            assert_eq!(report.sessions[0].summary.usage_ms, 1_000);
+        }
     }
 
     #[test]
@@ -1608,15 +2956,33 @@ mod tests {
 
     #[test]
     fn source_and_session_identifiers_are_stable_across_reimports() {
-        let source = card_with_brp(simple_flow());
+        let source = card_with_detail_files([
+            ("DATALOG/20260102_220000_BRP.edf", simple_flow()),
+            (
+                "DATALOG/20260102_220000_SA2.edf",
+                synthetic_brp(
+                    &[SignalFixture::new("Pulse", 6, &[-1, 60, 61, -1, 62, 63])],
+                    1,
+                    "6",
+                ),
+            ),
+        ]);
         let first = import_resmed_sessions(&source, &options()).expect("first import");
         let second = import_resmed_sessions(&source, &options()).expect("second import");
 
         assert_eq!(first.sessions[0].id, second.sessions[0].id);
         assert_eq!(first.sessions[0].source_key, second.sessions[0].source_key);
         assert_eq!(
-            first.sessions[0].waveforms[0].source_key,
-            second.sessions[0].waveforms[0].source_key
+            first.sessions[0]
+                .waveforms
+                .iter()
+                .map(|series| &series.source_key)
+                .collect::<Vec<_>>(),
+            second.sessions[0]
+                .waveforms
+                .iter()
+                .map(|series| &series.source_key)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1676,7 +3042,37 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_brp_budgets_fail_closed_before_large_allocations() {
+    fn timezone_basis_is_bounded_by_utf8_byte_length_before_session_work() {
+        let mut context = clock();
+        context.timezone_basis = Some("x".repeat(MAX_TIMEZONE_BASIS_BYTES));
+        validate_clock_context(&context).expect("exact ASCII byte boundary");
+        context.timezone_basis = Some("é".repeat(MAX_TIMEZONE_BASIS_BYTES / 2));
+        validate_clock_context(&context).expect("exact multibyte UTF-8 boundary");
+
+        context
+            .timezone_basis
+            .as_mut()
+            .expect("timezone basis")
+            .push('x');
+        let error = validate_clock_context(&context).expect_err("one byte beyond boundary");
+        assert_eq!(error.kind, ImportErrorKind::InvalidConfiguration);
+        assert!(error.message.contains("UTF-8 bytes"));
+
+        let source = card_with_brp(simple_flow());
+        let mut import_options = options();
+        import_options
+            .clock_context
+            .as_mut()
+            .expect("clock")
+            .timezone_basis = context.timezone_basis;
+        let error =
+            import_resmed_sessions(&source, &import_options).expect_err("oversized basis is fatal");
+        assert_eq!(error.kind, ImportErrorKind::InvalidConfiguration);
+        assert_eq!(source.full_read_count("DATALOG/20260102_220000_BRP.edf"), 0);
+    }
+
+    #[test]
+    fn aggregate_detail_budgets_cover_brp_sad_sa2_and_hostile_adapters() {
         let file = budget_file(1);
         let mut duplicated_candidate = budget_index(vec![file.clone()]);
         duplicated_candidate
@@ -1689,6 +3085,26 @@ mod tests {
             (1, 1)
         );
 
+        let mut sad = file.clone();
+        sad.kind = ResmedSessionFileKind::Sad;
+        sad.relative_path = "DATALOG/budget_SAD.edf".to_owned();
+        let mut sa2 = file.clone();
+        sa2.kind = ResmedSessionFileKind::Sa2;
+        sa2.relative_path = "DATALOG/budget_SA2.edf".to_owned();
+        let all_detail_kinds = budget_index(vec![file.clone(), sad.clone(), sa2.clone()]);
+        let mut detail_budget = DetailImportBudget::from_brp_index(&all_detail_kinds)
+            .expect("only BRP is part of fatal preflight");
+        assert_eq!(detail_budget.indexed_files, 1);
+        assert_eq!(detail_budget.indexed_bytes, 1);
+        detail_budget
+            .reserve_optional_indexed_file(&sad)
+            .expect("SAD fits remaining optional budget");
+        detail_budget
+            .reserve_optional_indexed_file(&sa2)
+            .expect("SA2 fits remaining optional budget");
+        assert_eq!(detail_budget.indexed_files, 3);
+        assert_eq!(detail_budget.indexed_bytes, 3);
+
         let too_many_files = budget_index(
             (0..=RESMED_BRP_MAX_FILES_PER_IMPORT)
                 .map(|index| {
@@ -1699,7 +3115,7 @@ mod tests {
                 .collect(),
         );
         assert_eq!(
-            BrpImportBudget::from_index(&too_many_files)
+            DetailImportBudget::from_brp_index(&too_many_files)
                 .expect_err("file budget")
                 .kind,
             ImportErrorKind::SizeLimitExceeded
@@ -1718,7 +3134,7 @@ mod tests {
                 .collect(),
         );
         assert_eq!(
-            BrpImportBudget::from_index(&too_many_bytes)
+            DetailImportBudget::from_brp_index(&too_many_bytes)
                 .expect_err("aggregate byte budget")
                 .kind,
             ImportErrorKind::SizeLimitExceeded
@@ -1726,7 +3142,7 @@ mod tests {
 
         let aggregate_byte_limit = usize::try_from(RESMED_BRP_MAX_TOTAL_BYTES_PER_IMPORT)
             .expect("aggregate byte budget fits usize");
-        let mut actual = BrpImportBudget::default();
+        let mut actual = DetailImportBudget::default();
         actual
             .charge_actual_bytes(aggregate_byte_limit)
             .expect("inclusive actual-byte boundary");
@@ -1744,7 +3160,7 @@ mod tests {
                 .kind,
             ImportErrorKind::SizeLimitExceeded
         );
-        let mut short_remainder = BrpImportBudget::default();
+        let mut short_remainder = DetailImportBudget::default();
         short_remainder
             .charge_actual_bytes(aggregate_byte_limit - 7)
             .expect("leave a seven-byte remainder");
@@ -1755,31 +3171,48 @@ mod tests {
             7
         );
 
-        let mut output = BrpImportBudget::default();
+        let mut output = DetailImportBudget::default();
         output
-            .reserve_output_samples(RESMED_BRP_MAX_OUTPUT_SAMPLES_PER_IMPORT)
-            .expect("inclusive sample boundary");
+            .reserve_output(
+                RESMED_BRP_MAX_OUTPUT_SAMPLES_PER_IMPORT,
+                RESMED_DETAIL_MAX_OUTPUT_SERIES_PER_IMPORT,
+            )
+            .expect("inclusive output boundaries");
         assert_eq!(
-            output
-                .reserve_output_samples(1)
-                .expect_err("sample budget")
-                .kind,
+            output.reserve_output(1, 0).expect_err("sample budget").kind,
             ImportErrorKind::SizeLimitExceeded
         );
+        assert_eq!(
+            output.reserve_output(0, 1).expect_err("series budget").kind,
+            ImportErrorKind::SizeLimitExceeded
+        );
+        assert_eq!(
+            output.output_samples,
+            RESMED_BRP_MAX_OUTPUT_SAMPLES_PER_IMPORT
+        );
+        assert_eq!(
+            output.output_series,
+            RESMED_DETAIL_MAX_OUTPUT_SERIES_PER_IMPORT
+        );
 
-        let source = card_with_brp(simple_flow());
+        const SAD_PATH: &str = "DATALOG/20260102_220000_SAD.edf";
+        let sad_bytes = simple_oximetry();
+        let source = card_with_detail_files([
+            ("DATALOG/20260102_220000_BRP.edf", simple_flow()),
+            (SAD_PATH, sad_bytes.clone()),
+        ]);
         let clock_context = clock();
         let current = resmed_local_from_device(clock_context.current_device_local_time)
             .expect("valid fixture clock");
         let inventory = source.inventory().expect("fixture inventory");
         let index = index_session_candidates_from_inventory(&source, &inventory, &current)
             .expect("fixture candidate");
-        let mut exhausted_actual = BrpImportBudget::default();
+        let mut exhausted_actual = DetailImportBudget::default();
         exhausted_actual
             .charge_actual_bytes(aggregate_byte_limit)
             .expect("fill actual byte budget");
         let mut statistics = ImportStatistics::default();
-        let fatal_actual = decode_candidate(
+        let fatal_actual = decode_brp_candidate(
             &source,
             &index.candidates[0],
             "serial-123",
@@ -1792,12 +3225,12 @@ mod tests {
         assert_eq!(fatal_actual.kind, ImportErrorKind::SizeLimitExceeded);
         assert_eq!(source.full_read_count("DATALOG/20260102_220000_BRP.edf"), 0);
 
-        let mut exhausted_output = BrpImportBudget::default();
+        let mut exhausted_output = DetailImportBudget::default();
         exhausted_output
-            .reserve_output_samples(RESMED_BRP_MAX_OUTPUT_SAMPLES_PER_IMPORT)
+            .reserve_output(RESMED_BRP_MAX_OUTPUT_SAMPLES_PER_IMPORT, 0)
             .expect("fill aggregate output budget");
         let mut statistics = ImportStatistics::default();
-        let fatal_output = decode_candidate(
+        let fatal_output = decode_brp_candidate(
             &source,
             &index.candidates[0],
             "serial-123",
@@ -1809,15 +3242,64 @@ mod tests {
         .expect("aggregate output limit propagates");
         assert_eq!(fatal_output.kind, ImportErrorKind::SizeLimitExceeded);
 
+        let sad_file = index.candidates[0]
+            .files
+            .iter()
+            .find(|file| file.kind == ResmedSessionFileKind::Sad)
+            .expect("indexed SAD");
+        let mut oximetry_output = DetailImportBudget::default();
+        oximetry_output
+            .reserve_output(RESMED_BRP_MAX_OUTPUT_SAMPLES_PER_IMPORT, 0)
+            .expect("fill aggregate output budget");
+        let mut statistics = ImportStatistics::default();
+        let fatal_oximetry_output = decode_oximetry_file(
+            &source,
+            sad_file,
+            "serial-123",
+            &clock_context,
+            &mut statistics,
+            &mut oximetry_output,
+        )
+        .err()
+        .expect("SAD shares aggregate output budget");
+        assert_eq!(
+            fatal_oximetry_output.kind,
+            ImportErrorKind::SizeLimitExceeded
+        );
+
+        let hostile = LimitIgnoringSource {
+            bytes: sad_bytes.clone(),
+        };
+        let mut hostile_budget = DetailImportBudget::default();
+        hostile_budget
+            .charge_actual_bytes(
+                aggregate_byte_limit
+                    .checked_sub(sad_bytes.len() - 1)
+                    .expect("fixture fits aggregate budget"),
+            )
+            .expect("leave one byte less than the SAD payload");
+        let mut statistics = ImportStatistics::default();
+        let hostile_error = read_detail_edf(
+            &hostile,
+            sad_file,
+            "serial-123",
+            &mut statistics,
+            &mut hostile_budget,
+        )
+        .err()
+        .expect("adapter returning beyond the requested remainder fails closed");
+        assert_eq!(hostile_error.kind, ImportErrorKind::SizeLimitExceeded);
+        assert_eq!(statistics.files_read, 0);
+
         let oversized_file = budget_file(
             u64::try_from(RESMED_BRP_MAX_FILE_BYTES).expect("file budget fits u64") + 1,
         );
         let mut oversized_index = budget_index(vec![oversized_file]);
-        let mut decode_budget =
-            BrpImportBudget::from_index(&oversized_index).expect("aggregate budget still fits");
+        let mut decode_budget = DetailImportBudget::from_brp_index(&oversized_index)
+            .expect("aggregate budget still fits");
         let candidate = oversized_index.candidates.remove(0);
         let mut statistics = ImportStatistics::default();
-        let fatal = decode_candidate(
+        let fatal = decode_brp_candidate(
             &MemorySource::default(),
             &candidate,
             "serial-123",
@@ -1828,6 +3310,68 @@ mod tests {
         .err()
         .expect("per-file size limit propagates");
         assert_eq!(fatal.kind, ImportErrorKind::SizeLimitExceeded);
+    }
+
+    #[test]
+    fn optional_oximetry_sample_and_segment_exhaustion_retains_brp_session() {
+        for exhausted_dimension in ["samples", "series"] {
+            let source = card_with_detail_files([
+                ("DATALOG/20260102_220000_BRP.edf", simple_flow()),
+                ("DATALOG/20260102_220000_SAD.edf", simple_oximetry()),
+            ]);
+            let clock_context = clock();
+            let current = resmed_local_from_device(clock_context.current_device_local_time)
+                .expect("valid fixture clock");
+            let inventory = source.inventory().expect("fixture inventory");
+            let index = index_session_candidates_from_inventory(&source, &inventory, &current)
+                .expect("fixture candidate");
+            let candidate = &index.candidates[0];
+            let mut budget =
+                DetailImportBudget::from_brp_index(&index).expect("BRP fatal preflight");
+            let mut statistics = ImportStatistics::default();
+            let mut decoded = decode_brp_candidate(
+                &source,
+                candidate,
+                "serial-123",
+                &clock_context,
+                &mut statistics,
+                &mut budget,
+            )
+            .expect("decode BRP anchor");
+            let mut session = decoded.session.take().expect("BRP-backed session");
+            match exhausted_dimension {
+                "samples" => {
+                    budget.output_samples = RESMED_BRP_MAX_OUTPUT_SAMPLES_PER_IMPORT;
+                }
+                "series" => {
+                    budget.output_series = RESMED_DETAIL_MAX_OUTPUT_SERIES_PER_IMPORT;
+                }
+                _ => unreachable!("fixture dimension"),
+            }
+
+            attach_candidate_oximetry(
+                &source,
+                candidate,
+                "serial-123",
+                &clock_context,
+                &mut session,
+                &mut decoded.warnings,
+                &mut statistics,
+                &mut budget,
+            )
+            .expect("optional limit is scoped to its SAD attachment");
+
+            assert_eq!(session.waveforms.len(), 1, "{exhausted_dimension}");
+            assert_eq!(session.waveforms[0].channel_id, FLOW_RATE_CHANNEL);
+            assert_eq!(session.summary.usage_ms, 2_000);
+            assert!(
+                decoded
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.code == "resmed_sad_not_decoded"),
+                "{exhausted_dimension}"
+            );
+        }
     }
 
     #[test]

@@ -20,7 +20,9 @@ use tempfile::{TempDir, tempdir};
 const CARD_SERIAL: &str = "SYNTHETIC-BRP-CARD-0001";
 const OTHER_SERIAL: &str = "SYNTHETIC-BRP-OTHER-0002";
 const BRP_PATH: &str = "DATALOG/20260102_220000_BRP.edf";
+const SAD_PATH: &str = "DATALOG/20260102_220000_SAD.edf";
 const FLOW_CHANNEL: &str = "pap.series.flow_rate";
+const PULSE_CHANNEL: &str = "oximetry.series.pulse_rate";
 const EXPECTED_START_UTC_MS: i64 = 1_767_366_000_250;
 const EXPECTED_END_UTC_MS: i64 = 1_767_366_002_250;
 
@@ -53,6 +55,13 @@ impl BrpWorld {
 #[given("a temporary ResMed card with a matching synthetic BRP recording")]
 fn matching_card(world: &mut BrpWorld) {
     install_card(world, CARD_SERIAL);
+}
+
+#[given("a temporary ResMed card with matching synthetic BRP and gapped SAD recordings")]
+fn matching_card_with_oximetry(world: &mut BrpWorld) {
+    install_card(world, CARD_SERIAL);
+    fs::write(world.card_path().join(SAD_PATH), build_sad_edf(CARD_SERIAL))
+        .expect("write synthetic SAD EDF");
 }
 
 #[given("a temporary ResMed card with a mismatched synthetic BRP recording")]
@@ -153,15 +162,37 @@ fn affine_flow_samples(world: &mut BrpWorld) {
     assert_eq!(encoding.record_duration_seconds, 1.0);
 }
 
+#[then("its SAD missing sentinels split pulse into contiguous calibrated segments")]
+fn gapped_pulse_segments(world: &mut BrpWorld) {
+    let session = &world.report().sessions[0];
+    let pulse: Vec<_> = session
+        .waveforms
+        .iter()
+        .filter(|series| series.channel_id == PULSE_CHANNEL)
+        .collect();
+    assert_eq!(pulse.len(), 2);
+    assert_eq!(pulse[0].start_time_unix_ms, EXPECTED_START_UTC_MS + 250);
+    assert_eq!(pulse[0].sample_interval_ms, 250.0);
+    assert_eq!(pulse[0].samples, vec![60.0, 61.0]);
+    assert_eq!(pulse[1].start_time_unix_ms, EXPECTED_START_UTC_MS + 1_000);
+    assert_eq!(pulse[1].sample_interval_ms, 250.0);
+    assert_eq!(pulse[1].samples, vec![62.0, 63.0]);
+    assert_eq!(session.summary.usage_ms, 2_000);
+}
+
 #[then("its imported identifiers are opaque and private")]
 fn opaque_private_ids(world: &mut BrpWorld) {
     let session = &world.report().sessions[0];
     let fixture_path = world.card_path().to_string_lossy();
-    for value in [
-        session.id.as_str(),
-        session.source_key.as_str(),
-        session.waveforms[0].source_key.as_str(),
-    ] {
+    for value in [session.id.as_str(), session.source_key.as_str()]
+        .into_iter()
+        .chain(
+            session
+                .waveforms
+                .iter()
+                .map(|waveform| waveform.source_key.as_str()),
+        )
+    {
         assert_opaque_sha256(value);
         for forbidden in [CARD_SERIAL, BRP_PATH, "DATALOG", fixture_path.as_ref()] {
             assert!(
@@ -280,6 +311,46 @@ fn build_brp_edf(recording_serial: &str) -> Vec<u8> {
     assert_eq!(bytes.len(), HEADER_BYTES);
 
     for sample in [-100_i16, 0, 50, 100] {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    bytes
+}
+
+fn build_sad_edf(recording_serial: &str) -> Vec<u8> {
+    const SIGNAL_COUNT: usize = 1;
+    const HEADER_BYTES: usize = 256 + SIGNAL_COUNT * 256;
+    const RECORD_COUNT: usize = 2;
+    const SAMPLES_PER_RECORD: usize = 4;
+
+    let mut bytes = Vec::with_capacity(HEADER_BYTES + RECORD_COUNT * SAMPLES_PER_RECORD * 2);
+    append_field(&mut bytes, "0", 8);
+    append_field(&mut bytes, "synthetic subject", 80);
+    append_field(
+        &mut bytes,
+        &format!("ResMed acceptance SRN={recording_serial}"),
+        80,
+    );
+    append_field(&mut bytes, "02.01.26", 8);
+    append_field(&mut bytes, "22.00.00", 8);
+    append_field(&mut bytes, &HEADER_BYTES.to_string(), 8);
+    append_field(&mut bytes, "", 44);
+    append_field(&mut bytes, &RECORD_COUNT.to_string(), 8);
+    append_field(&mut bytes, "1", 8);
+    append_field(&mut bytes, &SIGNAL_COUNT.to_string(), 4);
+
+    append_field(&mut bytes, "Pulse", 16);
+    append_field(&mut bytes, "", 80);
+    append_field(&mut bytes, "bpm", 8);
+    append_field(&mut bytes, "-1", 8);
+    append_field(&mut bytes, "200", 8);
+    append_field(&mut bytes, "-1", 8);
+    append_field(&mut bytes, "200", 8);
+    append_field(&mut bytes, "", 80);
+    append_field(&mut bytes, &SAMPLES_PER_RECORD.to_string(), 8);
+    append_field(&mut bytes, "", 32);
+    assert_eq!(bytes.len(), HEADER_BYTES);
+
+    for sample in [-1_i16, 60, 61, -1, 62, 63, -1, -1] {
         bytes.extend_from_slice(&sample.to_le_bytes());
     }
     bytes
