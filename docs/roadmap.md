@@ -11,9 +11,10 @@ The current repository has:
 
 - the Rust workspace, pinned OSCAR-code provenance, GPL/privacy policies, and CI;
 - bounded ResMed card detection, machine identification, and pre-import DATALOG
-  candidate indexing, but no STR-seeded session importer;
+  candidate indexing, plus a direct core-library importer for validated
+  uncompressed BRP waveforms;
 - an independent hardened EDF/EDF+ parser used for bounded candidate-header
-  inspection, but not for importing clinical signals;
+  inspection and the narrow BRP import slice;
 - selected channel metadata and pure analytics helpers with documented
   fail-closed/checked differences, but no imported data pipeline or
   full-session OSCAR goldens;
@@ -21,7 +22,8 @@ The current repository has:
 - a responsive Mantine interface populated only by clearly labeled fabricated
   data; and
 - experimental service, native-host, and renderer boundaries that cannot
-  execute session imports; browser preview therapy data remains fabricated.
+  durably execute session imports; the advertised `session_import` capability
+  remains `false` and browser preview therapy data remains fabricated.
 
 The present wiring and missing links are detailed in
 [Architecture and integration status](architecture.md).
@@ -56,12 +58,19 @@ events, waveforms, summaries, timezone handling, and duplicate detection into
 safe Rust slices. Keep parsers independent from UI and storage so pure portions
 can later target WASM.
 
-The present candidate index is only a bounded heuristic: it is not seeded from
-STR mask-on/mask-off records. Compressed EDF, AEV, and unknown DATALOG suffixes
-may be grouped as candidates, but their payloads are not decoded or imported.
-Machine type/settings, oximetry, and clinical signal decoding remain in this
-milestone. CSL is Cheyne-Stokes respiration (CSR) annotation data, not a
-central-apnea channel.
+The first slice is now implemented at the core library boundary: it discovers
+and indexes a source, validates complete uncompressed BRP files, applies full
+affine EDF calibration, normalizes supported flow signals to L/min, and returns
+bounded partial sessions with stable opaque keys and scoped warnings. Its
+caller must provide an explicit fixed-offset device-clock context.
+
+The candidate index remains a heuristic and is not seeded from STR
+mask-on/mask-off records. STR intervals/settings, PLD, EVE, CSL, SAD/SA2 payload
+decoding, compressed BRP, durable service execution, native import-job
+capability, and real UI therapy queries remain in this milestone. CSL is
+Cheyne-Stokes respiration (CSR) annotation data, not a central-apnea channel.
+The partial BRP library result is not evidence that this milestone or OSCAR
+session parity is complete.
 
 Gate: malformed-input unit and fuzz tests pass; differential results match the
 OSCAR baseline; importing the same card twice is idempotent; cancellation or a

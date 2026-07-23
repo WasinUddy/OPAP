@@ -1,19 +1,19 @@
 # Architecture and integration status
 
 This document describes the repository as it exists today. It is not a claim of
-OSCAR parity or a promise that the preview can import therapy data.
+OSCAR parity or a promise that the desktop preview can import therapy data.
 
 ## Component boundaries
 
 | Component | Responsibility | Present integration status |
 | --- | --- | --- |
-| `apps/desktop` | React, TypeScript, Mantine navigation and data visualization | Selects an explicitly fabricated adapter in a browser and a typed command adapter in Tauri; therapy views remain sample-only |
+| `apps/desktop` | React, TypeScript, Mantine navigation and data visualization | Selects an explicitly fabricated adapter in a browser and a typed command adapter in Tauri; real therapy query APIs are unavailable |
 | `apps/desktop/src-tauri` | Thin Tauri 2 native host, native folder picker, local database setup, and allowlisted commands | Delegates to `opap-service` and keeps source paths native; no session-import executor is exposed |
-| `crates/opap-service` | Framework-neutral DTOs and application workflows for profiles, opaque source selection, and import-job state | Used by the native host and tested in the root workspace; jobs remain blocked because the session importer is unavailable |
-| `crates/opap-core` | Portable domain contracts, bounded import-source abstraction, ResMed detection, identity parsing, and candidate indexing | Used by the CLI, source-inspection foundations, and DATALOG candidate scans; its ResMed `import` operation is intentionally unsupported |
-| `crates/opap-edf` | Filesystem-independent EDF/EDF+ parsing and validation | Tested independently, including WASM compilation; `opap-core` uses bounded EDF header inspection for candidate indexing, not clinical signal import |
-| `crates/opap-storage` | SQLite migrations, constraints, repositories, and atomic session-data replacement | Tested as a library; no real importer currently writes clinical sessions to it |
-| `tests/acceptance` | Executable Gherkin scenarios | Covers synthetic ResMed detection, machine identification, and privacy-safe service job workflows |
+| `crates/opap-service` | Framework-neutral DTOs and application workflows for profiles, opaque source selection, and import-job state | Used by the native host and tested in the root workspace; jobs remain blocked because durable import execution is not implemented and `session_import` remains `false` |
+| `crates/opap-core` | Portable domain contracts, bounded import-source abstraction, ResMed detection, identity parsing, candidate indexing, and partial session import | A direct library caller can import validated uncompressed BRP waveforms with explicit clock context; other ResMed payloads are not decoded |
+| `crates/opap-edf` | Filesystem-independent EDF/EDF+ parsing and validation | Tested independently, including WASM compilation; `opap-core` uses it for bounded candidate headers and complete uncompressed BRP signal decoding |
+| `crates/opap-storage` | SQLite migrations, constraints, repositories, and atomic session-data replacement | Tested as a library; no durable service workflow currently writes core BRP import reports to a user profile |
+| `tests/acceptance` | Executable Gherkin scenarios | Covers synthetic ResMed detection, machine identification, partial BRP import, and privacy-safe service job workflows |
 | `compat` | Pinned OSCAR-code differential manifest, comparator, and private oracle workflow | Synthetic v1 manifest comparisons are available; real-card adapters and full-session goldens remain external/planned |
 
 The root Cargo workspace contains the portable domain, parsing, analytics,
@@ -34,13 +34,20 @@ Native desktop
 Identity CLI
   opap-core CLI -> bounded DirectorySource -> ResMed detection/identity
 
-Independent parser
-  caller-provided bytes -> opap-edf -> validated EDF/EDF+ structures
+Core library import
+  caller-provided ImportSource + explicit fixed-offset clock context
+    -> ResmedImporter discovery/candidate index
+    -> opap-edf validation + affine calibration
+    -> bounded partial BRP sessions with stable opaque keys and warnings
 ```
 
-There is no path from a real CPAP card to displayed sessions. In particular,
-`opap-edf` is not yet connected to ResMed filename/session grouping, settings,
-events, waveform channels, summaries, timezone repair, or SQLite persistence.
+There is no path from a real CPAP card to persisted and displayed sessions.
+Only validated uncompressed BRP waveforms are connected at the direct core
+library boundary. Supported flow is normalized to L/min and source
+calibration/timestamp provenance is retained. STR intervals/settings, PLD, EVE,
+CSL, SAD/SA2 payload decoding, compressed BRP, durable service execution,
+native import-job capability, and real UI therapy queries remain unavailable.
+The browser adapter continues to provide explicitly fabricated demo data.
 
 ## Intended end-to-end shape
 
@@ -96,13 +103,18 @@ privacy-hardening claim.
 ## Time and calculation contracts
 
 Device-local time, timezone context, correction provenance, and normalized UTC
-must remain distinguishable. OSCAR-compatible day grouping and timestamp repair
-cannot be inferred from UTC alone. Clinically meaningful calculations need a
-versioned algorithm, named input channels, deterministic tests, and documented
-tolerances against the pinned OSCAR baseline.
+must remain distinguishable. The BRP slice requires an explicit fixed UTC
+offset, device-local reference time, and clock correction from its caller; it
+does not consult or guess from the host timezone. OSCAR-compatible STR day
+grouping and broader timestamp repair are not implemented. Clinically
+meaningful calculations need a versioned algorithm, named input channels,
+deterministic tests, and documented tolerances against the pinned OSCAR
+baseline.
 
-Until those contracts are implemented and verified, the application must show
-the value as unavailable rather than derive or fabricate it.
+Until the remaining contracts are implemented and verified, the native
+application must show the value as unavailable rather than derive or fabricate
+it. Fabricated browser-preview values must remain explicitly labeled as demo
+data.
 
 ## WASM boundary
 

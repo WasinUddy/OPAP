@@ -5,10 +5,12 @@ selected OSCAR behavior in safe Rust and pairing it with a minimal React and
 Mantine desktop interface.
 
 > [!IMPORTANT]
-> OPAP is a developer preview. It does **not** import real therapy sessions yet,
-> does **not** have full OSCAR compatibility, and must not be used to diagnose,
-> monitor, or change treatment. The screens currently display fabricated sample
-> data.
+> OPAP is a developer preview. Its core Rust library can decode a narrow,
+> bounded subset of ResMed data into partial sessions, but there is **no
+> supported end-to-end import path** and no full OSCAR compatibility. The
+> service/native session-import capability remains disabled, therapy screens
+> display fabricated sample data, and OPAP must not be used to diagnose,
+> monitor, or change treatment.
 
 ## Current status
 
@@ -16,12 +18,12 @@ The repository contains tested foundations, not a user-ready CPAP application:
 
 | Area | What works now | Important limit |
 | --- | --- | --- |
-| ResMed source handling | Bounded card inventory, card detection, machine identification, and a heuristic DATALOG candidate index | Detection does not parse STR records or establish import readiness; session import deliberately returns `UnsupportedOperation` |
-| EDF/EDF+ | A safe, allocation-bounded parser for headers, samples, calibration, and TAL annotations; candidate indexing reads bounded headers | Clinical signals are not imported, and deliberate safety/spec corrections mean parser behavior is not universally identical to OSCAR |
-| Local storage | Versioned SQLite migrations and repositories for profiles, machines, sessions, events, waveforms, chunks, and import history | No end-to-end importer populates a user profile |
-| Desktop UI | Responsive Mantine Overview, Daily, Import, and Settings/About screens with an explicit browser-demo adapter and a typed native adapter | Therapy views still contain fabricated sample values; no session importer populates them |
-| Native/application boundaries | A thin Tauri host delegates bootstrap, profile/source inspection, and blocked import-job workflows to the framework-neutral service | Real source inspection is local and path-opaque, but session import remains unavailable |
-| Compatibility tests | Synthetic unit/integration tests, ResMed identification Cucumber scenarios, and an opt-in private conformance layout | A canonical full-session oracle comparison and golden suite remain planned |
+| ResMed source handling | Bounded card inventory, card detection, machine identification, a heuristic DATALOG candidate index, and core-library import of validated uncompressed BRP waveforms as partial sessions | STR intervals/settings, PLD, EVE, CSL, SAD/SA2 payloads, and compressed BRP are not decoded |
+| EDF/EDF+ | A safe, allocation-bounded parser for headers, samples, full affine calibration, and TAL annotations; the BRP slice imports supported calibrated signals and normalizes flow to L/min | Only supported uncompressed BRP signals feed sessions, and deliberate safety/spec corrections mean parser behavior is not universally identical to OSCAR |
+| Local storage | Versioned SQLite migrations and repositories for profiles, machines, sessions, events, waveforms, chunks, and import history | The BRP library report is not connected to a durable service import workflow or user profile |
+| Desktop UI | Responsive Mantine Overview, Daily, Import, and Settings/About screens with an explicit browser-demo adapter and a typed native adapter | Therapy views still contain fabricated sample values; real therapy query APIs are unavailable |
+| Native/application boundaries | A thin Tauri host delegates bootstrap, profile/source inspection, and blocked import-job workflows to the framework-neutral service | Real source inspection is local and path-opaque, but the advertised `session_import` capability remains `false` and no native job executes the core importer |
+| Compatibility tests | Synthetic unit/integration tests, ResMed identification and partial-BRP Cucumber scenarios, and an opt-in private conformance layout | A canonical full-session oracle comparison and golden suite remain planned |
 
 See the [architecture and integration status](docs/architecture.md), the
 [OSCAR port map](PORTING.md), and the [roadmap](docs/roadmap.md) for the exact
@@ -89,8 +91,18 @@ cargo run -p opap-core -- machine-info /path/to/card
 ```
 
 Treat the resulting serial number and source path as sensitive. These commands
-do not import EDF sessions, events, settings, summaries, or waveforms, and they
+do not invoke the core BRP import API, do not import or persist sessions, and
 never write to the source card.
+
+At the Rust library boundary, `ResmedImporter::import` can discover/index a card
+and decode validated, uncompressed BRP waveforms. The caller must supply an
+explicit fixed UTC-offset clock context; the importer never guesses from the
+host timezone. It applies full affine EDF calibration, normalizes supported
+flow signals to L/min, preserves source timing/calibration provenance, and
+returns deterministic opaque keys, partial-session warnings, and other
+privacy-safe diagnostics. File, aggregate-byte, parser-structure, and
+materialized-sample limits fail closed. This API does not persist its report or
+make native/UI import available.
 
 ## Development setup
 
@@ -147,14 +159,16 @@ commit `c5c7890785b196993c7c67966f024c32929ec5ab`.
 Compatibility is intentionally narrower than “OSCAR rewritten.” OPAP corrects
 OSCAR's derived JSON family-name truncation, excludes `RMVENT_*` definitions
 that exist only in OSCAR-SQL, and applies explicit safety guards to EDF and
-analytics behavior. The current session-candidate index is a pre-import
-heuristic without OSCAR's STR mask-on/mask-off seeding. Compressed EDF, AEV, and
-unknown DATALOG suffixes can be grouped as candidates, but their payloads,
-machine type/settings, events, waveforms, and oximetry remain unsupported.
-Analytics also omits OSCAR's CPAP-machine-type filter and uses a bounded form
-of OSCAR's day-style duration-weighted percentile calculation. See the
-[port map](PORTING.md) for exact deviations; no full-session parity claim is
-made.
+analytics behavior. The current session-candidate index is a heuristic without
+OSCAR's STR mask-on/mask-off seeding. Its first import slice decodes only
+validated uncompressed BRP waveforms, returning explicitly partial sessions
+with stable opaque keys and warnings. STR intervals/settings, PLD, EVE, CSL,
+SAD/SA2 payload decoding, compressed BRP, STR settings/summary metrics, durable
+service execution, native import jobs, and real UI therapy queries remain
+unavailable. Analytics also omits OSCAR's CPAP-machine-type filter and uses a
+bounded form of OSCAR's day-style duration-weighted percentile calculation.
+See the [port map](PORTING.md) for exact deviations; no full-session parity
+claim is made.
 
 ## Project principles
 
