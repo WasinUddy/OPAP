@@ -9,7 +9,7 @@ repository = "https://github.com/WasinUddy/OPAP"
 readme = "README.md"
 
 [dependencies]
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 thiserror = "2"
 
 [dev-dependencies]

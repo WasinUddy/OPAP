@@ -11,7 +11,7 @@ readme = "README.md"
 [dependencies]
 opap-core = { version = "0.1.0", path = "../opap-core" }
 opap-storage = { version = "0.1.0", path = "../opap-storage" }
-rusqlite = { version = "0.37", default-features = false }
+rusqlite = { version = "0.40", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 uuid = { version = "1.18", features = ["v4"] }
 
