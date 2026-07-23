@@ -31,11 +31,15 @@ assert_eq!(
 
 ## Scope
 
-The registry includes only:
+The registry includes:
 
 - the five PAP event annotations persisted by the pinned ResMed EVE loader;
 - the three BRP signals accepted by that loader;
-- PLD signals that the pinned loader actually persists; and
+- PLD signals that the pinned loader actually persists;
+- the CSL `CSR Start`/`CSR End` pair used to build Cheyne Stokes respiration
+  spans;
+- foundational STR pressure, ramp, mode, EPR, climate, comfort, and bilevel
+  settings persisted by `StoreSettings`; and
 - OSCAR's device-reported apnea compatibility channel plus pressure/leak roles
   that match OPAP's current analytics inputs.
 
@@ -47,7 +51,16 @@ OSCAR's label-starts-with-alias direction and case-insensitive comparison. That
 resolver also fails closed when aliases from multiple channels match.
 File-family scope is part of an alias identity: for example, `Mask Pres` means
 the high-rate mask-pressure channel in BRP and the regular mask-pressure channel
-in PLD.
+in PLD. STR-only setting labels do not resolve as PLD, EVE, or CSL data.
+OSCAR's shared translation table is an explicit exception: the IPAP/EPAP
+`S.BL.*` and `S.S.*` aliases are accepted by both PLD and STR dispatch.
+
+Some pinned setting metadata is deliberately alias-free. `S.PtAccess` becomes
+either the S9/10 patient-access setting or the AirSense/AirCurve 11 patient-view
+setting depending on machine generation, and the same `Mode` source is stored
+as both OSCAR's generic PAP mode and ResMed's raw mode. Registering those labels
+twice would make exact resolution ambiguous, so only the unambiguous canonical
+mapping is exposed.
 
 The permissive resolver is locale-independent. It compares the Unicode
 lowercase forms of characters without normalization. This matches the pinned
@@ -61,6 +74,11 @@ present; the pinned parser uses `-1.0` when it is absent, and the loader forward
 that value. Each accepted record is counted once. Keeping these facts separate
 prevents a payload from being mislabeled as an events-per-hour measurement.
 
+`Unit::Percent` is likewise the summary/display unit for the CSL CSR channel.
+The loader pairs `CSR Start` with `CSR End`, stores the completed span at the end
+timestamp, and attaches elapsed seconds as its payload. `SpanSemantics` and
+`resmed_span_endpoint_role` preserve those endpoint and payload facts.
+
 `ChannelDto` is an owned transport snapshot and can deserialize untrusted data.
 Use `ChannelDto::registered_definition` to resolve its stable key and obtain
 canonical metadata. `ChannelDto::is_canonical_snapshot` checks every field when
@@ -68,10 +86,14 @@ an exact registry snapshot is required.
 
 ## Deliberate omissions
 
-- CSL/CSR spans, SAD/SA2 oximetry, STR settings, machine type/settings,
-  summary-only channels, and other device families are outside this crate's
-  initial scope. Clear-airway events come from EVE annotations; CSL carries
-  CSR span annotations and is not a source for clear-airway events.
+- SAD/SA2 oximetry, STR summary statistics, machine identity, summary-only
+  channels, and other device families remain outside this scope. Clear-airway
+  events come from EVE annotations; CSL carries CSR spans and is not a source
+  for clear-airway events.
+- The pinned loader declares `RMAS1x_EasyBreathe` and can store it, but never
+  assigns it a `ChannelID`. This registry does not manufacture the apparent
+  missing `0xe211` value. `RMS9_TubeType` is also unregistered and not persisted
+  by `StoreSettings`.
 - The pinned PLD loader recognizes I:E labels but its persistence call is
   commented out; this registry therefore does not claim I:E support.
 - The loader explicitly skips `AlvMinVent.2s`, `CLRatio.2s`, and

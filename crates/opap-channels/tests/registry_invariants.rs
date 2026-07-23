@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
 use opap_channels::{
-    CHANNELS, ChannelDto, ChannelKind, LegacyOscarChannelId, ResmedFileKind, Unit, by_legacy_id,
-    by_legacy_numeric_id, by_stable_key, resmed_signal, resmed_signal_prefix,
+    CHANNELS, ChannelDto, ChannelKind, LegacyOscarChannelId, ResmedFileKind, SpanEndpointRole,
+    Unit, by_legacy_id, by_legacy_numeric_id, by_stable_key, resmed_signal, resmed_signal_prefix,
+    resmed_span_endpoint_role,
 };
 
 #[test]
@@ -65,10 +66,19 @@ fn event_and_series_invariants_are_explicit() {
                     .expect("every event requires explicit semantics");
                 assert!(semantics.count_each_record);
                 assert_eq!(channel.unit, Unit::EventsPerHour);
+                assert_eq!(channel.span_semantics, None);
             }
-            ChannelKind::SampledSeries => {
+            ChannelKind::SampledSeries | ChannelKind::Setting => {
                 assert_eq!(channel.event_semantics, None);
+                assert_eq!(channel.span_semantics, None);
                 assert_ne!(channel.unit, Unit::EventsPerHour);
+            }
+            ChannelKind::Span => {
+                assert_eq!(channel.event_semantics, None);
+                let semantics = channel
+                    .span_semantics
+                    .expect("every span requires explicit semantics");
+                assert!(!semantics.endpoints.is_empty());
             }
         }
     }
@@ -115,13 +125,27 @@ fn aliases_are_unique_within_a_file_family() {
 }
 
 #[test]
-fn source_coverage_has_one_documented_analytics_only_exception() {
+fn source_coverage_allows_only_settings_and_one_analytics_exception_without_aliases() {
     let without_resmed_aliases: Vec<_> = CHANNELS
         .iter()
-        .filter(|channel| channel.resmed_signals.is_empty())
+        .filter(|channel| channel.resmed_signals.is_empty() && channel.kind != ChannelKind::Setting)
         .map(|channel| channel.key.as_str())
         .collect();
     assert_eq!(without_resmed_aliases, ["pap.event.device_reported_apnea"]);
+
+    let alias_free_settings: Vec<_> = CHANNELS
+        .iter()
+        .filter(|channel| channel.resmed_signals.is_empty() && channel.kind == ChannelKind::Setting)
+        .map(|channel| channel.key.as_str())
+        .collect();
+    assert_eq!(
+        alias_free_settings,
+        [
+            "pap.setting.resmed.patient_access",
+            "pap.setting.resmed.patient_view",
+            "pap.setting.resmed.therapy_mode",
+        ]
+    );
 }
 
 #[test]
@@ -165,6 +189,16 @@ fn prefix_lookup_matches_oscar_case_and_cropped_alias_policy() {
         resmed_signal_prefix(ResmedFileKind::Eve, "OBSTRUCTIVE APNEA (OA)"),
         Some(obstructive)
     );
+
+    let ipap = by_stable_key("pap.series.ipap").expect("IPAP channel");
+    assert_eq!(
+        resmed_signal_prefix(ResmedFileKind::Pld, "s.bl.ipap diagnostic suffix"),
+        Some(ipap)
+    );
+    assert_eq!(
+        resmed_signal_prefix(ResmedFileKind::Str, "s.bl.ipap diagnostic suffix"),
+        Some(ipap)
+    );
 }
 
 #[test]
@@ -189,6 +223,80 @@ fn prefix_lookup_remains_file_scoped_and_fails_closed() {
         resmed_signal_prefix(ResmedFileKind::Pld, "unknown signal"),
         None
     );
+
+    // Exact STR aliases can still overlap under permissive prefix matching.
+    // "EPR" and "S.Temp" must not steal more specific setting labels.
+    assert_eq!(resmed_signal_prefix(ResmedFileKind::Str, "EPR Level"), None);
+    assert_eq!(
+        resmed_signal_prefix(ResmedFileKind::Str, "S.TempEnable"),
+        None
+    );
+}
+
+#[test]
+fn csl_span_endpoints_are_exact_file_scoped_and_role_aware() {
+    let csr = by_stable_key("pap.span.cheyne_stokes_respiration").expect("CSR span");
+    assert_eq!(resmed_signal(ResmedFileKind::Csl, "CSR Start"), Some(csr));
+    assert_eq!(resmed_signal(ResmedFileKind::Csl, "CSR End"), Some(csr));
+    assert_eq!(
+        resmed_span_endpoint_role(ResmedFileKind::Csl, "CSR Start"),
+        Some(SpanEndpointRole::Start)
+    );
+    assert_eq!(
+        resmed_span_endpoint_role(ResmedFileKind::Csl, "CSR End"),
+        Some(SpanEndpointRole::End)
+    );
+    assert_eq!(resmed_signal(ResmedFileKind::Eve, "CSR Start"), None);
+    assert_eq!(
+        resmed_span_endpoint_role(ResmedFileKind::Csl, "csr start"),
+        None
+    );
+    assert_eq!(
+        resmed_span_endpoint_role(ResmedFileKind::Str, "S.RampTime"),
+        None
+    );
+}
+
+#[test]
+fn str_settings_are_exact_and_do_not_leak_into_detailed_file_scopes() {
+    let cases = [
+        ("Min Pressure", "pap.setting.minimum_pressure"),
+        ("S.RampTime", "pap.setting.ramp_time"),
+        ("S.AA.StartPress", "pap.setting.ramp_pressure"),
+        ("S.VA.MaxIPAP", "pap.setting.ipap_maximum"),
+        ("S.i.MinEPAP", "pap.setting.epap_minimum"),
+        ("S.AV.MaxPS", "pap.setting.pressure_support_maximum"),
+        ("Mode", "pap.setting.pap_mode"),
+        ("S.S.RiseTime", "pap.setting.resmed.rise_time"),
+    ];
+
+    for (alias, key) in cases {
+        assert_eq!(
+            resmed_signal(ResmedFileKind::Str, alias)
+                .expect("STR setting alias")
+                .key
+                .as_str(),
+            key
+        );
+        assert_eq!(resmed_signal(ResmedFileKind::Pld, alias), None, "{alias}");
+        assert_eq!(resmed_signal(ResmedFileKind::Csl, alias), None, "{alias}");
+    }
+}
+
+#[test]
+fn every_exact_resmed_alias_resolves_without_ambiguity() {
+    for channel in CHANNELS {
+        for signal in channel.resmed_signals {
+            for alias in signal.aliases {
+                assert_eq!(
+                    resmed_signal(signal.file, alias),
+                    Some(channel),
+                    "{:?} {alias}",
+                    signal.file
+                );
+            }
+        }
+    }
 }
 
 #[test]

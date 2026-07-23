@@ -73,6 +73,10 @@ pub enum ChannelKind {
     Event,
     /// A time-ordered sampled or stepwise physical series.
     SampledSeries,
+    /// A bounded interval represented by paired start and end records.
+    Span,
+    /// A session-level machine configuration value.
+    Setting,
 }
 
 /// Canonical OPAP units after importer normalization.
@@ -94,6 +98,12 @@ pub enum Unit {
     BreathsPerMinute,
     /// Seconds.
     Seconds,
+    /// Minutes.
+    Minutes,
+    /// Milliseconds.
+    Milliseconds,
+    /// Degrees Celsius.
+    DegreesCelsius,
     /// Percentage.
     Percent,
     /// A dimensionless ratio.
@@ -115,6 +125,9 @@ impl Unit {
             Self::Milliliters => "mL",
             Self::BreathsPerMinute => "breaths/min",
             Self::Seconds => "s",
+            Self::Minutes => "min",
+            Self::Milliseconds => "ms",
+            Self::DegreesCelsius => "°C",
             Self::Percent => "%",
             Self::Ratio => "ratio",
             Self::SeverityZeroToOne => "0-1",
@@ -123,7 +136,7 @@ impl Unit {
     }
 }
 
-/// `ResMed` detailed-data file family in the supported registry scope.
+/// `ResMed` file family in the supported registry scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResmedFileKind {
@@ -133,6 +146,10 @@ pub enum ResmedFileKind {
     Brp,
     /// Low-rate detailed data (`*_PLD.edf`).
     Pld,
+    /// Cheyne-Stokes respiration span annotations (`*_CSL.edf`).
+    Csl,
+    /// Daily summary and machine settings (`STR.edf`).
+    Str,
 }
 
 /// How a `ResMed` EVE event timestamp is represented.
@@ -164,6 +181,56 @@ pub struct EventSemantics {
     pub payload: EventPayload,
     /// Whether each imported record contributes one occurrence to event counts.
     pub count_each_record: bool,
+}
+
+/// How a paired span endpoint participates in the interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpanEndpointRole {
+    /// Opens a span.
+    Start,
+    /// Closes a span.
+    End,
+}
+
+/// How a `ResMed` span endpoint timestamp is represented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpanEndpointTimestamp {
+    /// EDF recording start plus the annotation onset offset.
+    ResmedEdfAnnotationOnset,
+}
+
+/// What the numeric payload attached to a completed span means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpanPayload {
+    /// Elapsed seconds from the paired start endpoint to the end endpoint.
+    ElapsedSecondsBetweenEndpoints,
+}
+
+/// One exact `ResMed` endpoint label and its role in a span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ResmedSpanEndpointDescriptor {
+    /// File family in which the endpoint label has this meaning.
+    pub file: ResmedFileKind,
+    /// Exact annotation label accepted by the pinned loader.
+    pub alias: &'static str,
+    /// Whether this annotation opens or closes the span.
+    pub role: SpanEndpointRole,
+}
+
+/// Evidence-backed semantics for a paired span channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SpanSemantics {
+    /// Meaning of each endpoint timestamp.
+    pub endpoint_timestamp: SpanEndpointTimestamp,
+    /// Endpoint whose timestamp is stored for the completed span.
+    pub stored_timestamp: SpanEndpointRole,
+    /// Meaning of the completed span's numeric payload.
+    pub payload: SpanPayload,
+    /// Exact endpoint annotations accepted by the pinned loader.
+    pub endpoints: &'static [ResmedSpanEndpointDescriptor],
 }
 
 /// A formula-level role intended for OPAP analytics integration.
@@ -225,10 +292,12 @@ pub struct ChannelDefinition {
     pub unit: Unit,
     /// Compatibility-only OSCAR metadata.
     pub legacy_oscar: LegacyOscarMetadata,
-    /// `ResMed` aliases supported by the pinned EVE/BRP/PLD code paths.
+    /// `ResMed` aliases supported by the pinned detailed and STR code paths.
     pub resmed_signals: &'static [ResmedSignalDescriptor],
     /// Individual-record semantics for event channels.
     pub event_semantics: Option<EventSemantics>,
+    /// Paired-endpoint semantics for span channels.
+    pub span_semantics: Option<SpanSemantics>,
     /// Formula-level analytics use, if any.
     pub analytics_role: Option<AnalyticsRole>,
 }
@@ -250,6 +319,7 @@ impl ChannelDefinition {
                 .map(ResmedSignalDto::from)
                 .collect(),
             event_semantics: self.event_semantics,
+            span_semantics: self.span_semantics.map(SpanSemanticsDto::from),
             analytics_role: self.analytics_role,
         }
     }
@@ -307,6 +377,56 @@ impl From<ResmedSignalDescriptor> for ResmedSignalDto {
     }
 }
 
+/// Owned, round-trippable `ResMed` span-endpoint DTO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResmedSpanEndpointDto {
+    /// File family in which the endpoint label has this meaning.
+    pub file: ResmedFileKind,
+    /// Exact annotation label accepted by the pinned loader.
+    pub alias: String,
+    /// Whether this annotation opens or closes the span.
+    pub role: SpanEndpointRole,
+}
+
+impl From<ResmedSpanEndpointDescriptor> for ResmedSpanEndpointDto {
+    fn from(endpoint: ResmedSpanEndpointDescriptor) -> Self {
+        Self {
+            file: endpoint.file,
+            alias: String::from(endpoint.alias),
+            role: endpoint.role,
+        }
+    }
+}
+
+/// Owned, round-trippable span semantics DTO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpanSemanticsDto {
+    /// Meaning of each endpoint timestamp.
+    pub endpoint_timestamp: SpanEndpointTimestamp,
+    /// Endpoint whose timestamp is stored for the completed span.
+    pub stored_timestamp: SpanEndpointRole,
+    /// Meaning of the completed span's numeric payload.
+    pub payload: SpanPayload,
+    /// Exact endpoint annotations accepted by the pinned loader.
+    pub endpoints: Vec<ResmedSpanEndpointDto>,
+}
+
+impl From<SpanSemantics> for SpanSemanticsDto {
+    fn from(semantics: SpanSemantics) -> Self {
+        Self {
+            endpoint_timestamp: semantics.endpoint_timestamp,
+            stored_timestamp: semantics.stored_timestamp,
+            payload: semantics.payload,
+            endpoints: semantics
+                .endpoints
+                .iter()
+                .copied()
+                .map(ResmedSpanEndpointDto::from)
+                .collect(),
+        }
+    }
+}
+
 /// Owned, round-trippable channel DTO for storage and IPC boundaries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelDto {
@@ -324,6 +444,9 @@ pub struct ChannelDto {
     pub resmed_signals: Vec<ResmedSignalDto>,
     /// Individual-record semantics for event channels.
     pub event_semantics: Option<EventSemantics>,
+    /// Paired-endpoint semantics for span channels.
+    #[serde(default)]
+    pub span_semantics: Option<SpanSemanticsDto>,
     /// Formula-level analytics use, if any.
     pub analytics_role: Option<AnalyticsRole>,
 }

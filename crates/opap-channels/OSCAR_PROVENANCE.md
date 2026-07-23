@@ -18,7 +18,9 @@ OSCAR executable fixture or an end-to-end compatibility claim.
 |---|---|
 | Copyright notices and GPL terms on the source files | [`schema.cpp` lines 1–8](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/schema.cpp#L1-8), [`resmed_loader.cpp` lines 1–8](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/loader_plugins/resmed_loader.cpp#L1-8) |
 | Pressure-series IDs, lookup codes, labels, schema kinds, and units | [`schema.cpp` lines 134–150](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/schema.cpp#L134-150) |
+| Generic pressure/ramp setting IDs, lookup codes, labels, and units | [`schema.cpp` lines 151–161](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/schema.cpp#L151-161) |
 | Event IDs, lookup codes, labels, schema kinds, and units | [`schema.cpp` lines 162–180](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/schema.cpp#L162-180) |
+| Generic PAP mode ID, labels, and unit | [`schema.cpp` lines 311–324](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/schema.cpp#L311-324) |
 | Common waveform IDs, labels, schema kinds, and units | [`schema.cpp` lines 230–278](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/schema.cpp#L230-278) |
 | Exact lookup-code constants used by the waveform declarations | [`common_gui.h` lines 16–32](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/common_gui.h#L16-32) |
 | Exact default English unit strings | [`common.cpp` lines 744–770](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/common.cpp#L744-770) |
@@ -32,8 +34,12 @@ OSCAR executable fixture or an end-to-end compatibility claim.
 | OSCAR's permissive case-insensitive prefix matcher | [`resmed_loader.cpp` lines 3940–3955](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/loader_plugins/resmed_loader.cpp#L3940-3955) |
 | Exact EVE/BRP/PLD signal-alias table | [`resmed_loader.cpp` lines 3957–4015](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/loader_plugins/resmed_loader.cpp#L3957-4015) |
 | CSL carries CSR start/end spans rather than clear-airway events | [`resmed_loader.cpp` lines 3144–3211](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/loader_plugins/resmed_loader.cpp#L3144-3211) |
+| ResMed-specific RMS9/RMAS1x setting IDs, labels, and units | [`resmed_loader.cpp` lines 123–288](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/loader_plugins/resmed_loader.cpp#L123-288) |
+| STR mode, pressure, ramp, EPR, climate, and bilevel setting labels | [`resmed_loader.cpp` lines 1549–2086](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/loader_plugins/resmed_loader.cpp#L1549-2086) |
+| STR values persisted as session settings | [`resmed_loader.cpp` lines 2576–2695](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/loader_plugins/resmed_loader.cpp#L2576-2695) |
+| Legacy `RMS9_SetPressure` ID and labels | [`channels.xml` lines 14–16](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/docs/channels.xml#L14-16) |
 
-Every one of the 22 registry entries was rechecked against those declarations,
+Every one of the 58 registry entries was rechecked against those declarations,
 unit constants, loader branches, and alias rows at the pinned revision.
 
 ## Compatibility boundaries
@@ -66,9 +72,25 @@ unit constants, loader branches, and alias rows at the pinned revision.
 - Clear-airway events are sourced from EVE's `Central apnea` annotation. CSL
   parses `CSR Start`/`CSR End` spans and must not be treated as a source of
   clear-airway events.
+- A completed CSL CSR span is stored at its `CSR End` annotation timestamp with
+  elapsed seconds since the matching `CSR Start` as the numeric payload. The
+  channel's `%` unit remains OSCAR's summary/display unit.
+- The generic IPAP and EPAP entries remain sampled-series channels because the
+  same OSCAR IDs are persisted from detailed data as well as used in STR
+  settings. OSCAR's global alias table makes the `S.BL.*` and `S.S.*` aliases
+  available to both PLD and STR dispatch, so OPAP preserves both scopes.
+  STR-only extrema, pressure support, ramp, and mode records use the setting
+  storage kind.
+- `S.PtAccess` maps to different stored setting IDs for pre-AS11 and AS11
+  devices, while `Mode` produces both a generic and a raw ResMed mode. Those
+  duplicate, model-dependent raw mappings are deliberately alias-free so the
+  exact resolver remains unambiguous.
+- `RMAS1x_EasyBreathe` is declared and used by the loader but is never assigned
+  a `ChannelID` at this revision. OPAP does not infer that the unused `0xe211`
+  gap belongs to it.
 
-CSL/CSR spans, SAD/SA2 oximetry, machine type/settings, STR settings,
-summary-only channels, and other device families remain outside this crate's
-scope. No source EDF fixture or loader result is bundled here, so this crate
-claims metadata-level source fidelity only. End-to-end parity requires
-anonymized or synthetic EDF fixtures exercised through the importer.
+SAD/SA2 oximetry, STR summary statistics, machine identity, summary-only
+channels, and other device families remain outside this crate's scope. No
+source EDF fixture or loader result is bundled here, so this crate claims
+metadata-level source fidelity only. End-to-end parity requires anonymized or
+synthetic EDF fixtures exercised through the importer.

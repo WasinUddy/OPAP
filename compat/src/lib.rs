@@ -2181,6 +2181,8 @@ fn resmed_file_kind_name(kind: ResmedFileKind) -> &'static str {
         ResmedFileKind::Eve => "eve",
         ResmedFileKind::Brp => "brp",
         ResmedFileKind::Pld => "pld",
+        ResmedFileKind::Csl => "csl",
+        ResmedFileKind::Str => "str",
     }
 }
 
@@ -3110,6 +3112,15 @@ fn push_difference(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn semantic_digest_file_kind_names_cover_all_resmed_families() {
+        assert_eq!(resmed_file_kind_name(ResmedFileKind::Eve), "eve");
+        assert_eq!(resmed_file_kind_name(ResmedFileKind::Brp), "brp");
+        assert_eq!(resmed_file_kind_name(ResmedFileKind::Pld), "pld");
+        assert_eq!(resmed_file_kind_name(ResmedFileKind::Csl), "csl");
+        assert_eq!(resmed_file_kind_name(ResmedFileKind::Str), "str");
+    }
 
     #[derive(Deserialize)]
     struct WaveformDigestVector {

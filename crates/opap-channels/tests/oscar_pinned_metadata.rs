@@ -1,6 +1,7 @@
 use opap_channels::{
     AnalyticsRole, CHANNELS, ChannelKind, EventPayload, EventSemantics, EventTimestamp,
-    ResmedFileKind, Unit, by_stable_key, resmed_signal,
+    ResmedFileKind, SpanEndpointRole, SpanEndpointTimestamp, SpanPayload, Unit,
+    by_legacy_numeric_id, by_stable_key, resmed_signal, resmed_span_endpoint_role,
 };
 
 // The legacy fields and ResMed aliases in this hand-maintained metadata
@@ -164,17 +165,23 @@ const EXPECTED_CHANNELS: &[ExpectedChannel] = &[
         "EPAP",
         "EPAP",
         "cmH2O",
-        &[(
-            ResmedFileKind::Pld,
-            &[
-                "Exp Pres",
-                "EprPress.2s",
-                "EPAP",
-                "S.BL.EPAP",
-                "EPRPress.2s",
-                "S.S.EPAP"
-            ]
-        )],
+        &[
+            (
+                ResmedFileKind::Pld,
+                &[
+                    "Exp Pres",
+                    "EprPress.2s",
+                    "EPAP",
+                    "S.BL.EPAP",
+                    "EPRPress.2s",
+                    "S.S.EPAP"
+                ]
+            ),
+            (
+                ResmedFileKind::Str,
+                &["Exp Pres", "EPAP", "S.BL.EPAP", "S.S.EPAP"]
+            )
+        ],
         None,
         None
     ),
@@ -249,10 +256,16 @@ const EXPECTED_CHANNELS: &[ExpectedChannel] = &[
         "IPAP",
         "IPAP",
         "cmH2O",
-        &[(
-            ResmedFileKind::Pld,
-            &["Insp Pres", "IPAP", "S.BL.IPAP", "S.S.IPAP"]
-        )],
+        &[
+            (
+                ResmedFileKind::Pld,
+                &["Insp Pres", "IPAP", "S.BL.IPAP", "S.S.IPAP"]
+            ),
+            (
+                ResmedFileKind::Str,
+                &["Insp Pres", "IPAP", "S.BL.IPAP", "S.S.IPAP"]
+            )
+        ],
         None,
         None
     ),
@@ -421,6 +434,631 @@ const EXPECTED_CHANNELS: &[ExpectedChannel] = &[
         None,
         None
     ),
+    expected_channel!(
+        "pap.setting.epap_maximum",
+        "Maximum expiratory pressure",
+        ChannelKind::Setting,
+        Unit::CentimetersOfWater,
+        0x111d,
+        "CPAP_EPAPHi",
+        "EPAPHi",
+        "Max EPAP",
+        "Max EPAP",
+        "cmH2O",
+        &[(
+            ResmedFileKind::Str,
+            &["Max EPAP", "S.i.MaxEPAP", "S.AA.MaxEPAP"]
+        )],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.epap_minimum",
+        "Minimum expiratory pressure",
+        ChannelKind::Setting,
+        Unit::CentimetersOfWater,
+        0x111c,
+        "CPAP_EPAPLo",
+        "EPAPLo",
+        "Min EPAP",
+        "Min EPAP",
+        "cmH2O",
+        &[(
+            ResmedFileKind::Str,
+            &["Min EPAP", "S.VA.MinEPAP", "S.i.MinEPAP", "S.AA.MinEPAP"]
+        )],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.ipap_maximum",
+        "Maximum inspiratory pressure",
+        ChannelKind::Setting,
+        Unit::CentimetersOfWater,
+        0x1111,
+        "CPAP_IPAPHi",
+        "IPAPHi",
+        "Max IPAP",
+        "Max IPAP",
+        "cmH2O",
+        &[(ResmedFileKind::Str, &["Max IPAP", "S.VA.MaxIPAP"])],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.ipap_minimum",
+        "Minimum inspiratory pressure",
+        ChannelKind::Setting,
+        Unit::CentimetersOfWater,
+        0x1110,
+        "CPAP_IPAPLo",
+        "IPAPLo",
+        "Min IPAP",
+        "Min IPAP",
+        "cmH2O",
+        &[(ResmedFileKind::Str, &["Min IPAP"])],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.maximum_pressure",
+        "Maximum therapy pressure",
+        ChannelKind::Setting,
+        Unit::CentimetersOfWater,
+        0x1021,
+        "CPAP_PressureMax",
+        "PressureMax",
+        "Max Pressure",
+        "Pressure Max",
+        "cmH2O",
+        &[(
+            ResmedFileKind::Str,
+            &[
+                "Max Pressure",
+                "Max. Druck",
+                "Max druk",
+                "最大压力",
+                "Pression max.",
+                "Max tryck",
+                "S.AS.MaxPress",
+                "S.A.MaxPress",
+                "Azami Basınç",
+                "S.AFH.MaxPress"
+            ]
+        )],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.minimum_pressure",
+        "Minimum therapy pressure",
+        ChannelKind::Setting,
+        Unit::CentimetersOfWater,
+        0x1020,
+        "CPAP_PressureMin",
+        "PressureMin",
+        "Min Pressure",
+        "Pressure Min",
+        "cmH2O",
+        &[(
+            ResmedFileKind::Str,
+            &[
+                "Min Pressure",
+                "Min. Druck",
+                "Min druk",
+                "最小压力",
+                "Pression min.",
+                "Min tryck",
+                "S.AS.MinPress",
+                "S.A.MinPress",
+                "Min Basınç",
+                "S.AFH.MinPress"
+            ]
+        )],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.pap_mode",
+        "PAP mode",
+        ChannelKind::Setting,
+        Unit::Unspecified,
+        0x1200,
+        "CPAP_Mode",
+        "PAPMode",
+        "PAP Mode",
+        "PAP Mode",
+        "",
+        &[(
+            ResmedFileKind::Str,
+            &["Mode", "Modus", "Funktion", "模式", "Mod"]
+        )],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.pressure_support",
+        "Pressure support",
+        ChannelKind::Setting,
+        Unit::CentimetersOfWater,
+        0x110f,
+        "CPAP_PS",
+        "PS",
+        "PS",
+        "PS",
+        "cmH2O",
+        &[(ResmedFileKind::Str, &["PS", "S.VA.PS"])],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.pressure_support_maximum",
+        "Maximum pressure support",
+        ChannelKind::Setting,
+        Unit::CentimetersOfWater,
+        0x111b,
+        "CPAP_PSMax",
+        "PSMax",
+        "PS Max",
+        "PS Max",
+        "cmH2O",
+        &[(
+            ResmedFileKind::Str,
+            &["Max PS", "S.i.MaxPS", "S.AV.MaxPS", "S.AA.MaxPS"]
+        )],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.pressure_support_minimum",
+        "Minimum pressure support",
+        ChannelKind::Setting,
+        Unit::CentimetersOfWater,
+        0x111a,
+        "CPAP_PSMin",
+        "PSMin",
+        "PS Min",
+        "PS Min",
+        "cmH2O",
+        &[(
+            ResmedFileKind::Str,
+            &["Min PS", "S.i.MinPS", "S.AV.MinPS", "S.AA.MinPS"]
+        )],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.ramp_pressure",
+        "Ramp pressure",
+        ChannelKind::Setting,
+        Unit::CentimetersOfWater,
+        0x1023,
+        "CPAP_RampPressure",
+        "RampPressure",
+        "Ramp Pressure",
+        "Ramp Pressure",
+        "cmH2O",
+        &[(
+            ResmedFileKind::Str,
+            &[
+                "S.C.StartPress",
+                "S.AS.StartPress",
+                "S.A.StartPress",
+                "S.AFH.StartPress",
+                "S.BL.StartPress",
+                "S.VA.StartPress",
+                "S.i.StartPress",
+                "S.AV.StartPress",
+                "S.AA.StartPress"
+            ]
+        )],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.ramp_time",
+        "Ramp time",
+        ChannelKind::Setting,
+        Unit::Minutes,
+        0x1022,
+        "CPAP_RampTime",
+        "RampTime",
+        "Ramp Time",
+        "Ramp Time",
+        "Minutes",
+        &[(ResmedFileKind::Str, &["S.RampTime"])],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.antibacterial_filter",
+        "Antibacterial filter",
+        ChannelKind::Setting,
+        Unit::Unspecified,
+        0xe209,
+        "RMS9_ABFilter",
+        "RMS9_ABFilter",
+        "AB Filter",
+        "Antibacterial Filter",
+        "",
+        &[(ResmedFileKind::Str, &["S.ABFilter"])],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.climate_control",
+        "Climate control",
+        ChannelKind::Setting,
+        Unit::Unspecified,
+        0xe20b,
+        "RMS9_ClimateControl",
+        "RMS9_ClimateControl",
+        "Climate Control",
+        "Climate Control",
+        "",
+        &[(ResmedFileKind::Str, &["S.ClimateControl"])],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.comfort_response",
+        "Comfort response",
+        ChannelKind::Setting,
+        Unit::Unspecified,
+        0xe20e,
+        "RMAS1x_Comfort",
+        "RMAS1x_Comfort",
+        "Response",
+        "Response",
+        "",
+        &[(ResmedFileKind::Str, &["S.AS.Comfort"])],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.cycle",
+        "Cycle sensitivity",
+        ChannelKind::Setting,
+        Unit::Unspecified,
+        0xe214,
+        "RMAS1x_Cycle",
+        "RMAS1x_Cycle",
+        "Cycle",
+        "Cycle",
+        "",
+        &[(ResmedFileKind::Str, &["S.Cycle", "S.S.Cycle", "S.VA.Cycle"])],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.epr",
+        "Expiratory pressure relief",
+        ChannelKind::Setting,
+        Unit::Unspecified,
+        0xe201,
+        "RMS9_EPR",
+        "EPR",
+        "EPR",
+        "EPR",
+        "",
+        &[(ResmedFileKind::Str, &["EPR", "呼气释压(EP"])],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.epr_level",
+        "Expiratory pressure relief level",
+        ChannelKind::Setting,
+        Unit::CentimetersOfWater,
+        0xe202,
+        "RMS9_EPRLevel",
+        "EPRLevel",
+        "EPR Level",
+        "EPR Level",
+        "cmH2O",
+        &[(
+            ResmedFileKind::Str,
+            &[
+                "EPR Level",
+                "EPR-Stufe",
+                "EPR-niveau",
+                "EPR 水平",
+                "Niveau EPR",
+                "EPR-nivå",
+                "EPR-nivÃ¥",
+                "S.EPR.Level",
+                "EPR Düzeyi"
+            ]
+        )],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.humidifier_enabled",
+        "Humidifier enabled",
+        ChannelKind::Setting,
+        Unit::Unspecified,
+        0xe205,
+        "RMS9_HumidStatus",
+        "RMS9_HumidStat",
+        "Humid. Status",
+        "Humidifier Status",
+        "",
+        &[(ResmedFileKind::Str, &["S.HumEnable"])],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.humidity_level",
+        "Humidity level",
+        ChannelKind::Setting,
+        Unit::Unspecified,
+        0xe206,
+        "RMS9_HumidLevel",
+        "RMS9_HumidLevel",
+        "Humid. Level",
+        "Humidity Level",
+        "",
+        &[(ResmedFileKind::Str, &["S.HumLevel"])],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.mask_type",
+        "Mask type",
+        ChannelKind::Setting,
+        Unit::Unspecified,
+        0xe20c,
+        "RMS9_Mask",
+        "RMS9_Mask",
+        "Mask",
+        "Mask",
+        "",
+        &[(ResmedFileKind::Str, &["S.Mask"])],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.patient_access",
+        "Patient access",
+        ChannelKind::Setting,
+        Unit::Unspecified,
+        0xe20a,
+        "RMS9_PtAccess",
+        "RMS9_PTAccess",
+        "Pt. Access",
+        "Essentials",
+        "",
+        &[],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.patient_view",
+        "Patient view",
+        ChannelKind::Setting,
+        Unit::Unspecified,
+        0xe210,
+        "RMAS11_PtView",
+        "RMAS11_PTView",
+        "Patient View",
+        "Patient View",
+        "",
+        &[],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.ramp_enabled",
+        "Ramp enabled",
+        ChannelKind::Setting,
+        Unit::Unspecified,
+        0xe20d,
+        "RMS9_RampEnable",
+        "RMS9_RampEnable",
+        "Ramp",
+        "Ramp",
+        "",
+        &[(ResmedFileKind::Str, &["S.RampEnable"])],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.rise_enabled",
+        "Rise enabled",
+        ChannelKind::Setting,
+        Unit::Unspecified,
+        0xe212,
+        "RMAS1x_RiseEnable",
+        "RMAS1x_RiseEnable",
+        "RiseEnable",
+        "RiseEnable",
+        "",
+        &[(ResmedFileKind::Str, &["S.RiseEnable", "S.S.RiseEnable"])],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.rise_time",
+        "Rise time",
+        ChannelKind::Setting,
+        Unit::Milliseconds,
+        0xe213,
+        "RMAS1x_RiseTime",
+        "RMAS1x_RiseTime",
+        "RiseTime",
+        "RiseTime",
+        "milliSeconds",
+        &[(ResmedFileKind::Str, &["S.RiseTime", "S.S.RiseTime"])],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.set_pressure",
+        "Set pressure",
+        ChannelKind::Setting,
+        Unit::CentimetersOfWater,
+        0x1162,
+        "RMS9_SetPressure",
+        "SetPressure",
+        "Set Pressure",
+        "Pressure",
+        "",
+        &[(
+            ResmedFileKind::Str,
+            &[
+                "Set Pressure",
+                "Eingest. Druck",
+                "Ingestelde druk",
+                "设定压力",
+                "Pres. prescrite",
+                "Inställt tryck",
+                "InstÃ¤llt tryck",
+                "S.C.Press",
+                "Basıncı Ayarl"
+            ]
+        )],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.smart_start",
+        "SmartStart",
+        ChannelKind::Setting,
+        Unit::Unspecified,
+        0xe204,
+        "RMS9_SmartStart",
+        "RMS9_SmartStart",
+        "SmartStart",
+        "Smart Start",
+        "",
+        &[(ResmedFileKind::Str, &["S.SmartStart"])],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.smart_stop",
+        "SmartStop",
+        ChannelKind::Setting,
+        Unit::Unspecified,
+        0xe20f,
+        "RMAS11_SmartStop",
+        "RMAS11_SmartStop",
+        "SmartStop",
+        "Smart Stop",
+        "",
+        &[(ResmedFileKind::Str, &["S.SmartStop"])],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.temperature",
+        "ClimateLine temperature",
+        ChannelKind::Setting,
+        Unit::DegreesCelsius,
+        0xe207,
+        "RMS9_Temp",
+        "RMS9_Temp",
+        "Temperature",
+        "Temperature",
+        "ºC",
+        &[(ResmedFileKind::Str, &["S.Temp"])],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.temperature_enabled",
+        "ClimateLine temperature enabled",
+        ChannelKind::Setting,
+        Unit::Unspecified,
+        0xe208,
+        "RMS9_TempEnable",
+        "RMS9_TempEnable",
+        "Temp. Enable",
+        "Temperature Enable",
+        "",
+        &[(ResmedFileKind::Str, &["S.TempEnable"])],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.therapy_mode",
+        "ResMed therapy mode",
+        ChannelKind::Setting,
+        Unit::Unspecified,
+        0xe203,
+        "RMS9_Mode",
+        "RMS9_Mode",
+        "Mode",
+        "Mode",
+        "",
+        &[],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.timax",
+        "Maximum inspiratory time",
+        ChannelKind::Setting,
+        Unit::Seconds,
+        0xe216,
+        "RMAS1x_TiMax",
+        "RMAS1x_TiMax",
+        "TiMax",
+        "TiMax",
+        "Seconds",
+        &[(ResmedFileKind::Str, &["S.TiMax", "S.S.TiMax", "S.VA.TiMax"])],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.timin",
+        "Minimum inspiratory time",
+        ChannelKind::Setting,
+        Unit::Seconds,
+        0xe217,
+        "RMAS1x_TiMin",
+        "RMAS1x_TiMin",
+        "TiMin",
+        "TiMin",
+        "Seconds",
+        &[(ResmedFileKind::Str, &["S.TiMin", "S.S.TiMin", "S.VA.TiMin"])],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.setting.resmed.trigger",
+        "Trigger sensitivity",
+        ChannelKind::Setting,
+        Unit::Unspecified,
+        0xe215,
+        "RMAS1x_Trigger",
+        "RMAS1x_Trigger",
+        "Trigger",
+        "Trigger",
+        "",
+        &[(
+            ResmedFileKind::Str,
+            &["S.Trigger", "S.S.Trigger", "S.VA.Trigger"]
+        )],
+        None,
+        None
+    ),
+    expected_channel!(
+        "pap.span.cheyne_stokes_respiration",
+        "Cheyne Stokes respiration",
+        ChannelKind::Span,
+        Unit::Percent,
+        0x1000,
+        "CPAP_CSR",
+        "CSR",
+        "Cheyne Stokes Respiration (CSR)",
+        "CSR",
+        "%",
+        &[(ResmedFileKind::Csl, &["CSR Start", "CSR End"])],
+        None,
+        None
+    ),
 ];
 
 #[test]
@@ -535,6 +1173,10 @@ fn representative_brp_and_pld_aliases_match_source_translation_map() {
             "pap.series.therapy_pressure",
         ),
         (ResmedFileKind::Pld, "EPRPress.2s", "pap.series.epap"),
+        (ResmedFileKind::Pld, "S.BL.EPAP", "pap.series.epap"),
+        (ResmedFileKind::Pld, "S.S.IPAP", "pap.series.ipap"),
+        (ResmedFileKind::Str, "S.BL.EPAP", "pap.series.epap"),
+        (ResmedFileKind::Str, "S.S.IPAP", "pap.series.ipap"),
         (ResmedFileKind::Pld, "TidVol.2s", "pap.series.tidal_volume"),
         (ResmedFileKind::Pld, "Leak.2s", "pap.series.leak_rate"),
         (
@@ -560,6 +1202,87 @@ fn source_skipped_pld_signals_are_not_registered_as_channels() {
     for alias in ["AlvMinVent.2s", "CLRatio.2s", "TRRatio.2s"] {
         assert_eq!(resmed_signal(ResmedFileKind::Pld, alias), None, "{alias}");
     }
+}
+
+#[test]
+fn csl_csr_metadata_and_endpoint_storage_match_pinned_loader() {
+    let csr = by_stable_key("pap.span.cheyne_stokes_respiration").expect("CSR channel");
+    assert_eq!(csr.kind, ChannelKind::Span);
+    assert_eq!(csr.unit, Unit::Percent);
+    assert_eq!(csr.legacy_oscar.id.get(), 0x1000);
+    assert_eq!(csr.legacy_oscar.cpp_symbol, "CPAP_CSR");
+    assert_eq!(csr.legacy_oscar.lookup_code, "CSR");
+    assert_eq!(
+        csr.legacy_oscar.english_label,
+        "Cheyne Stokes Respiration (CSR)"
+    );
+    assert_eq!(csr.legacy_oscar.short_label, "CSR");
+    assert_eq!(csr.legacy_oscar.unit_label, "%");
+
+    let semantics = csr.span_semantics.expect("CSR span semantics");
+    assert_eq!(
+        semantics.endpoint_timestamp,
+        SpanEndpointTimestamp::ResmedEdfAnnotationOnset
+    );
+    assert_eq!(semantics.stored_timestamp, SpanEndpointRole::End);
+    assert_eq!(
+        semantics.payload,
+        SpanPayload::ElapsedSecondsBetweenEndpoints
+    );
+    assert_eq!(semantics.endpoints.len(), 2);
+    assert_eq!(
+        resmed_span_endpoint_role(ResmedFileKind::Csl, "CSR Start"),
+        Some(SpanEndpointRole::Start)
+    );
+    assert_eq!(
+        resmed_span_endpoint_role(ResmedFileKind::Csl, "CSR End"),
+        Some(SpanEndpointRole::End)
+    );
+}
+
+#[test]
+fn resmed_setting_ids_are_pinned_without_inventing_easy_breathe() {
+    let cases = [
+        (0xe201, "RMS9_EPR"),
+        (0xe202, "RMS9_EPRLevel"),
+        (0xe203, "RMS9_Mode"),
+        (0xe204, "RMS9_SmartStart"),
+        (0xe205, "RMS9_HumidStatus"),
+        (0xe206, "RMS9_HumidLevel"),
+        (0xe207, "RMS9_Temp"),
+        (0xe208, "RMS9_TempEnable"),
+        (0xe209, "RMS9_ABFilter"),
+        (0xe20a, "RMS9_PtAccess"),
+        (0xe20b, "RMS9_ClimateControl"),
+        (0xe20c, "RMS9_Mask"),
+        (0xe20d, "RMS9_RampEnable"),
+        (0xe20e, "RMAS1x_Comfort"),
+        (0xe20f, "RMAS11_SmartStop"),
+        (0xe210, "RMAS11_PtView"),
+        (0xe212, "RMAS1x_RiseEnable"),
+        (0xe213, "RMAS1x_RiseTime"),
+        (0xe214, "RMAS1x_Cycle"),
+        (0xe215, "RMAS1x_Trigger"),
+        (0xe216, "RMAS1x_TiMax"),
+        (0xe217, "RMAS1x_TiMin"),
+    ];
+
+    for (id, symbol) in cases {
+        assert_eq!(
+            by_legacy_numeric_id(id)
+                .expect("pinned ResMed setting ID")
+                .legacy_oscar
+                .cpp_symbol,
+            symbol
+        );
+    }
+
+    assert_eq!(by_legacy_numeric_id(0xe211), None);
+    assert!(
+        CHANNELS
+            .iter()
+            .all(|channel| channel.legacy_oscar.cpp_symbol != "RMAS1x_EasyBreathe")
+    );
 }
 
 #[test]
