@@ -1,0 +1,131 @@
+{
+  "schema_version": "opap-oscar-compat/v1",
+  "oracle": {
+    "name": "OSCAR",
+    "repository": "https://gitlab.com/CrimsonNape/OSCAR-code",
+    "revision": "64c5e90a26f91fb15868bcfcccde0c1e1522ac86",
+    "export_schema_version": "opap-oscar-oracle/v1"
+  },
+  "producer": {
+    "role": "oracle",
+    "name": "OSCAR",
+    "source_revision": "64c5e90a26f91fb15868bcfcccde0c1e1522ac86",
+    "adapter_attestation": "synthetic_fixture_only",
+    "adapter_repository": "https://github.com/WasinUddy/OPAP",
+    "adapter_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "adapter_tree_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "adapter_conformance_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "adapter_clean": true
+  },
+  "fixture": {
+    "case_id": "synthetic-resmed-night",
+    "source_sha256": "191f86388cf82898383ae7449a767deb620445e897a9ba8dfccf7c15eb2b0f9a",
+    "synthetic": true
+  },
+  "machine": {
+    "manufacturer": "ResMed",
+    "model": "Synthetic AutoSet",
+    "model_number": "SYN-A10",
+    "serial_number": "SYNTHETIC-0001",
+    "firmware": "fixture-1",
+    "sha256": "7635a58fd56486d954585cb58ada92f7271418e4b5a933e0cfceca6c21832566"
+  },
+  "sessions": [
+    {
+      "session_id": "session_0001",
+      "source_id_sha256": "3dc99fe74efd88c53459e93de1e65a2912047740db3edabb79e17f2efc195145",
+      "source_sha256": "191f86388cf82898383ae7449a767deb620445e897a9ba8dfccf7c15eb2b0f9a",
+      "sha256": "d7352cde2fd063465b3188a1ff3509e38b16eb5c26d70353f6868ddb87de0ea0",
+      "time": {
+        "start_utc": "2025-01-01T15:00:00.000Z",
+        "end_utc": "2025-01-01T22:30:00.000Z",
+        "start_local": "2025-01-01T22:00:00.000",
+        "end_local": "2025-01-02T05:30:00.000",
+        "start_utc_offset_seconds": 25200,
+        "end_utc_offset_seconds": 25200,
+        "timezone_basis": "source_endpoint_metadata",
+        "start_clock_correction_milliseconds": 0,
+        "end_clock_correction_milliseconds": 0
+      },
+      "slices": {
+        "count": 1,
+        "sha256": "aa37f32998289adf0be813fa6f1aa1c260d98e3e2f8490c390d27c7261556c8d",
+        "items": [
+          {
+            "sequence": 0,
+            "source_id_sha256": "23bb05ff493a095a575870b61c01b691c52f7f32d89b9637c104aaf64d4849a1",
+            "status": "mask_on",
+            "start_offset_milliseconds": 0,
+            "end_offset_milliseconds": 27000000
+          }
+        ]
+      },
+      "summary": {
+        "usage_milliseconds": 27000000,
+        "metric_count": 2,
+        "source_sha256": "42e0a0142ef0d61dc16963eff0e1da37e622e3c72563b23c1f163cb4b534f457",
+        "metrics": [
+          { "key": "pap.summary.ahi", "value": 0.27, "unit": "events/h" },
+          { "key": "pap.summary.rdi", "value": 0.31, "unit": "events/h" }
+        ]
+      },
+      "settings": {
+        "count": 3,
+        "sha256": "e9d5800da38b0a6e90a7c25441551e745a68e87a68be50f7ff715e294a6007a4",
+        "items": [
+          { "key": "epap_cm_h2o", "value": { "type": "number", "value": 6.0 }, "unit": "cm[H2O]" },
+          { "key": "mode", "value": { "type": "text", "value": "autoset" }, "unit": "" },
+          { "key": "pressure_relief", "value": { "type": "integer", "value": 2 }, "unit": "" }
+        ]
+      },
+      "events": {
+        "channel_count": 1,
+        "sha256": "d1d6af6136d33c50809398957b5007f09ea70c97c3608a5a5803673117901100",
+        "channels": [
+          {
+            "channel_id": "pap.event.obstructive_apnea",
+            "source_file_kind": "eve",
+            "unit": "events/h",
+            "count": 2,
+            "sha256": "3e4339e7845d7c5881b9b9a92001f84a26c1c1267bafda151be2fedf3d982f06",
+            "items": [
+              { "sequence": 0, "source_id_sha256": "b2b3c7c3794199da42bccc267fd75ba2dfd365a6debec0d01d062dd6afe91bc7", "offset_milliseconds": 1830125, "duration_milliseconds": 11250, "value": 1.0 },
+              { "sequence": 1, "source_id_sha256": "89812495c4a1e4d17b3a6157f5413519030e3f5e5c891075cd69535edd8e9592", "offset_milliseconds": 5920500, "duration_milliseconds": 9750, "value": 1.0 }
+            ]
+          }
+        ]
+      },
+      "waveforms": {
+        "channel_count": 1,
+        "sha256": "adf0cce471b2352873ae8510dcbc728a7c3cf0a51ca7abe1f77b5d8cc62c6e9e",
+        "channels": [
+          {
+            "channel_id": "pap.series.flow_rate",
+            "source_file_kind": "brp",
+            "unit": "L/min",
+            "sample_rate_hz": 25.0,
+            "sample_count": 80,
+            "start_offset_milliseconds": 5000,
+            "segments": [
+              { "sequence": 0, "start_sample": 0, "sample_count": 40, "start_offset_milliseconds": 5000, "source_sha256": "801984606f3ce77d8d065d8f0c65af09b086475b81f9d10a17c3f3831161645f" },
+              { "sequence": 1, "start_sample": 40, "sample_count": 40, "start_offset_milliseconds": 8000, "source_sha256": "2a3b17cc53fe29fc39ff427891f78a79b8a3a8426aa3d172dcb96e0a880fac36" }
+            ],
+            "source_sha256": "0442fdcd640f5125d8bf60dcaf2b3249912440148ebde22910a2135600e15a8e",
+            "sha256": "fd36c987511bffb9f93237bc87f56e8a5ca22d50117dab98ceaa9ac9e95813a4",
+            "encoding": {
+              "kind": "edf-i16le-f32be-segments-v1",
+              "digital_min": -32768,
+              "digital_max": 32767,
+              "physical_min_decimal": "-16383",
+              "physical_max_decimal": "16384.5",
+              "samples_per_record": 40,
+              "record_duration_decimal": "1.6"
+            },
+            "head_samples": [1.0, 13.5, 25.5, 36.0, 44.5, 49.0, 50.5, 47.5, 41.0, 31.0, 18.5, 5.0, -8.5, -21.0, -32.5, -40.5],
+            "tail_samples": [-20.0, 158.0, 1360.0, -1358.0, 8193.0, -8191.0, 4097.0, -4095.0, 2049.0, -2047.0, 1025.0, -1023.0, 513.0, -511.0, 257.0, -255.0]
+          }
+        ]
+      }
+    }
+  ]
+}

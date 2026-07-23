@@ -1,0 +1,9 @@
+{
+  "records_utf8": ["first-record", "second-record\n"],
+  "record_stream_sha256": "ff0ca4fdd81b491a60b760d07a70d47efa4d2f393d696f4e6ba45bb5b6e93c94",
+  "tree": [
+    { "path": "Identification.json", "contents_utf8": "{\"model\":\"Synthetic\"}\n" },
+    { "path": "STR.edf", "contents_utf8": "synthetic-edf-header" }
+  ],
+  "source_tree_sha256": "7d71e686b6b8490f367c9739fd069257ff26228a2ed647fa471eb8cf6a53cfdf"
+}

@@ -1,0 +1,13 @@
+Repository: https://gitlab.com/CrimsonNape/OSCAR-code
+Revision: 64c5e90a26f91fb15868bcfcccde0c1e1522ac86
+Resolved branch: master
+Resolved at: 2026-07-23
+Reference tests:
+  oscar/tests/resmedtests.cpp
+  oscar/tests/sessiontests.cpp
+Reference implementation:
+  oscar/SleepLib/loader_plugins/resmed_loader.cpp
+
+This is the repository supplied for the OPAP port. It is a different Git
+history from CrimsonNape/OSCAR-SQL; the compatibility oracle must never be
+silently substituted with that project.
