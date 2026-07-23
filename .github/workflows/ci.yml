@@ -33,7 +33,7 @@ jobs:
           toolchain: 1.97.1
 
       - name: Install pnpm
-        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
           package_json_file: apps/desktop/package.json
           run_install: false
@@ -270,7 +270,7 @@ jobs:
 
       - name: Install pnpm
         if: steps.frontend.outputs.manager == 'pnpm'
-        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
           package_json_file: apps/desktop/package.json
           run_install: false
@@ -378,7 +378,7 @@ jobs:
           workspaces: apps/desktop/src-tauri -> target
 
       - name: Install pnpm
-        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
           package_json_file: apps/desktop/package.json
           run_install: false
