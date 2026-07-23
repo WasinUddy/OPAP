@@ -49,8 +49,9 @@ jobs:
         shell: bash
         run: |
           cargo fetch --manifest-path Cargo.toml --locked --target x86_64-unknown-linux-gnu
-          cargo fetch --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --target aarch64-apple-darwin
-          cargo fetch --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --target x86_64-apple-darwin
+          # Cargo metadata needs package manifests for the complete standalone
+          # lock graph even though the notice inventory is target-filtered.
+          cargo fetch --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
           node .github/scripts/prepare-third-party-node-dependencies.mjs
 
       - name: Test notice generator and Tauri legal resources
