@@ -398,3 +398,243 @@ impl<'a> Record<'a> {
             .and_then(|record| record.record_onset_seconds)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn signal_header(
+        physical_minimum: f64,
+        physical_maximum: f64,
+        digital_minimum: i32,
+        digital_maximum: i32,
+    ) -> SignalHeader {
+        SignalHeader {
+            label: "Flow".to_owned(),
+            transducer_type: String::new(),
+            physical_dimension: "unit".to_owned(),
+            physical_minimum,
+            physical_maximum,
+            digital_minimum,
+            digital_maximum,
+            prefiltering: String::new(),
+            samples_per_record: 0,
+            reserved: String::new(),
+        }
+    }
+
+    #[test]
+    fn complete_affine_calibration_maps_the_full_vector() {
+        let header = signal_header(-17.5, 42.5, -2048, 1024);
+        assert_eq!(header.gain(), Ok(0.019_531_25));
+        assert_eq!(header.offset(), Ok(22.5));
+
+        let digital = [-2048, -1024, 0, 512, 1024];
+        let expected = [-17.5, 2.5, 22.5, 32.5, 42.5];
+        for (sample, expected_value) in digital.into_iter().zip(expected) {
+            assert_eq!(header.physical_value(sample), Ok(expected_value));
+        }
+
+        let signal = Signal {
+            header,
+            data: SignalData::Digital(digital.to_vec()),
+        };
+        assert_eq!(
+            signal
+                .physical_samples()
+                .expect("finite affine calibration")
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[test]
+    fn equal_digital_bounds_report_the_exact_error_category() {
+        let header = signal_header(-1.0, 1.0, 7, 7);
+        assert_eq!(header.gain(), Err(CalibrationError::EqualDigitalBounds));
+        assert_eq!(header.offset(), Err(CalibrationError::EqualDigitalBounds));
+        assert_eq!(
+            header.physical_value(7),
+            Err(CalibrationError::EqualDigitalBounds)
+        );
+
+        let signal = Signal {
+            header,
+            data: SignalData::Digital(vec![7]),
+        };
+        assert_eq!(
+            signal
+                .physical_samples()
+                .expect_err("equal digital bounds cannot be calibrated"),
+            CalibrationError::EqualDigitalBounds
+        );
+    }
+
+    #[test]
+    fn annotation_samples_report_not_digital_before_calibration() {
+        let mut header = signal_header(-1.0, 1.0, 0, 0);
+        header.label = "EDF Annotations".to_owned();
+        let signal = Signal {
+            header,
+            data: SignalData::Annotations(Vec::new()),
+        };
+
+        assert_eq!(
+            signal
+                .physical_samples()
+                .expect_err("annotations do not contain digital samples"),
+            CalibrationError::NotDigitalSignal
+        );
+    }
+
+    #[test]
+    fn reversed_and_equal_physical_bounds_are_valid_calibrations() {
+        let reversed = signal_header(30.0, -10.0, -2, 2);
+        assert_eq!(reversed.gain(), Ok(-10.0));
+        assert_eq!(reversed.offset(), Ok(10.0));
+        let reversed_values =
+            [-2, -1, 0, 1, 2].map(|sample| reversed.physical_value(sample).expect("finite value"));
+        for (actual, expected) in reversed_values
+            .into_iter()
+            .zip([30.0_f64, 20.0, 10.0, 0.0, -10.0])
+        {
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+
+        let equal = signal_header(7.5, 7.5, i32::from(i16::MIN), i32::from(i16::MAX));
+        assert_eq!(equal.gain(), Ok(0.0));
+        assert_eq!(equal.offset(), Ok(7.5));
+        for sample in [i16::MIN, -1, 0, 1, i16::MAX] {
+            assert_eq!(equal.physical_value(sample), Ok(7.5));
+        }
+
+        let signal = Signal {
+            header: equal,
+            data: SignalData::Digital(vec![i16::MIN, 0, i16::MAX]),
+        };
+        assert_eq!(
+            signal
+                .physical_samples()
+                .expect("constant physical range is finite")
+                .collect::<Vec<_>>(),
+            [7.5, 7.5, 7.5]
+        );
+    }
+
+    #[test]
+    fn wrong_variant_accessors_return_none() {
+        let mut annotation_header = signal_header(-1.0, 1.0, -1, 1);
+        annotation_header.label = "EDF Annotations".to_owned();
+        annotation_header.samples_per_record = 8;
+        let annotation_record = AnnotationRecord {
+            record_index: 0,
+            record_onset_seconds: Some(0.0),
+            annotations: vec![Annotation {
+                onset_seconds: 0.5,
+                duration_seconds: None,
+                text: "event".to_owned(),
+            }],
+        };
+        let annotation_signal = Signal {
+            header: annotation_header.clone(),
+            data: SignalData::Annotations(vec![annotation_record]),
+        };
+
+        let mut digital_header = signal_header(-1.0, 1.0, -1, 1);
+        digital_header.samples_per_record = 2;
+        let digital_signal = Signal {
+            header: digital_header.clone(),
+            data: SignalData::Digital(vec![11, 12]),
+        };
+
+        assert!(annotation_signal.digital_samples().is_none());
+        assert!(digital_signal.annotation_records().is_none());
+
+        let file = EdfFile {
+            header: EdfHeader {
+                version: "0".to_owned(),
+                patient_id: String::new(),
+                recording_id: String::new(),
+                start: EdfDateTime {
+                    year: 2024,
+                    year_two_digits: 24,
+                    month: 1,
+                    day: 1,
+                    hour: 0,
+                    minute: 0,
+                    second: 0,
+                },
+                header_bytes: 768,
+                reserved: String::new(),
+                declared_record_count: Some(1),
+                record_duration_seconds: 1.0,
+                signals: vec![annotation_header, digital_header],
+            },
+            signals: vec![annotation_signal, digital_signal],
+            record_count: 1,
+            trailing_data_bytes: 0,
+        };
+        let record = file.record(0).expect("record");
+
+        assert!(record.digital_samples(0).is_none());
+        assert!(record.annotation_record(1).is_none());
+        assert!(record.annotations(1).is_none());
+        assert_eq!(record.digital_samples(1), Some(&[11, 12][..]));
+        assert_eq!(
+            record
+                .annotation_record(0)
+                .expect("annotation record")
+                .annotations[0]
+                .text,
+            "event"
+        );
+    }
+
+    #[test]
+    fn physical_iterator_conservatively_validates_the_full_i16_domain() {
+        let header = signal_header(0.0, 9e307, 0, 1);
+        assert_eq!(header.gain(), Ok(9e307));
+        assert_eq!(header.offset(), Ok(0.0));
+        assert_eq!(header.physical_value(0), Ok(0.0));
+        assert_eq!(
+            header.physical_value(2),
+            Err(CalibrationError::NonFiniteResult)
+        );
+
+        let signal = Signal {
+            header,
+            data: SignalData::Digital(vec![0]),
+        };
+        assert_eq!(
+            signal
+                .physical_samples()
+                .expect_err("the wire domain can overflow even when stored samples do not"),
+            CalibrationError::NonFiniteResult
+        );
+    }
+
+    #[test]
+    fn non_finite_gain_and_offset_report_the_exact_error_category() {
+        let gain_overflow = signal_header(-f64::MAX, f64::MAX, -1, 1);
+        assert_eq!(gain_overflow.gain(), Err(CalibrationError::NonFiniteResult));
+        assert_eq!(
+            gain_overflow.offset(),
+            Err(CalibrationError::NonFiniteResult)
+        );
+        assert_eq!(
+            gain_overflow.physical_value(0),
+            Err(CalibrationError::NonFiniteResult)
+        );
+
+        let offset_overflow = signal_header(1e308, 0.0, 32_767, 32_766);
+        assert_eq!(offset_overflow.gain(), Ok(1e308));
+        assert_eq!(
+            offset_overflow.offset(),
+            Err(CalibrationError::NonFiniteResult)
+        );
+        assert_eq!(
+            offset_overflow.physical_value(0),
+            Err(CalibrationError::NonFiniteResult)
+        );
+    }
+}
