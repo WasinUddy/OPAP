@@ -59,8 +59,14 @@ const STR_EDF: &str = "STR.edf";
 const IDENT_TGT: &str = "Identification.tgt";
 const IDENT_JSON: &str = "Identification.json";
 
+mod csl;
+mod eve;
+mod pld;
 mod session_import;
 mod session_index;
+pub mod str;
+mod str_settings;
+mod str_summary;
 
 pub use session_import::{
     RESMED_BRP_MAX_FILE_BYTES, RESMED_BRP_MAX_FILES_PER_IMPORT,
