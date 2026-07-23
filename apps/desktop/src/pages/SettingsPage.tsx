@@ -19,6 +19,7 @@ import {
 import { Code2, Database, ExternalLink, FolderOpen, HeartPulse, ShieldCheck, UserRound } from 'lucide-react';
 import sleepingBreath from '../assets/sleeping-breath.svg';
 import { buildInfo } from '../buildInfo';
+import { LegalNotices } from '../components/LegalNotices';
 
 export function SettingsPage() {
   return (
@@ -94,11 +95,13 @@ export function SettingsPage() {
             </div>
           </Group>
           <Text size="sm" c="gray.7" lh={1.65} mt="xl">
-            This interface preview contains fabricated sample data. OPAP is derived from SleepyHead, copyright © 2011–2018 Mark Watkins, and OSCAR, copyright © 2019–2026 The OSCAR Team. OPAP is distributed under the GNU General Public License, version 3 (GPLv3).
+            This interface preview contains fabricated sample data. OPAP is an independent,
+            modified derivative of OSCAR and SleepyHead, distributed under the GNU General Public
+            License, version 3 (GPLv3).
           </Text>
+          <Box mt="lg"><LegalNotices /></Box>
           <Group mt="lg" gap="sm">
             <Button component="a" href={buildInfo.sourceHref} target="_blank" rel="noreferrer" variant="default" color="gray" leftSection={<Code2 size={16} />} rightSection={<ExternalLink size={13} />}>{buildInfo.sourceLabel}</Button>
-            <Button component="a" href="https://www.gnu.org/licenses/gpl-3.0.html" target="_blank" variant="subtle" rightSection={<ExternalLink size={13} />}>GPLv3 license</Button>
           </Group>
         </div>
         <Divider my="xl" />

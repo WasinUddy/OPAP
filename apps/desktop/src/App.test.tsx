@@ -58,10 +58,10 @@ describe('OPAP desktop shell', () => {
   it('shows exact project attribution and a labelled preview source link', async () => {
     renderApp('/settings');
 
-    expect(await screen.findByText(/SleepyHead, copyright © 2011–2018 Mark Watkins/)).toHaveTextContent(
-      'OSCAR, copyright © 2019–2026 The OSCAR Team',
-    );
+    expect(await screen.findByText('Copyright © 2011–2018 Mark Watkins')).toBeInTheDocument();
+    expect(screen.getByText('Copyright © 2019–2025 The OSCAR Team')).toBeInTheDocument();
     expect(screen.getByText(/GNU General Public License, version 3 \(GPLv3\)/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Read GPLv3 license offline' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /Preview source repository · revision unavailable/i })).toHaveAttribute(
       'href',
       'https://github.com/WasinUddy/OPAP',

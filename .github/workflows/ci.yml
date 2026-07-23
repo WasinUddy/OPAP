@@ -260,6 +260,33 @@ jobs:
           VITE_OPAP_SOURCE_REVISION: ${{ github.sha }}
         run: ${{ steps.frontend.outputs.manager }} run build
 
+      - name: Stage legal and source notices in frontend artifact
+        if: steps.frontend.outputs.present == 'true'
+        shell: bash
+        run: |
+          mkdir -p apps/desktop/dist/legal
+          install -m 0644 COPYING NOTICE.md ASSETS.md OSCAR_PROVENANCE.md apps/desktop/dist/legal/
+          git rev-parse HEAD > apps/desktop/dist/legal/SOURCE-REVISION.txt
+          git archive \
+            --format=tar.gz \
+            --prefix="OPAP-source-${{ github.sha }}/" \
+            --output="apps/desktop/dist/legal/OPAP-source-${{ github.sha }}.tar.gz" \
+            HEAD
+          checksum_path="$(mktemp)"
+          (
+            cd apps/desktop/dist
+            find . -type f ! -name SHA256SUMS -print0 \
+              | sort -z \
+              | xargs -0 sha256sum > "$checksum_path"
+          )
+          install -m 0644 "$checksum_path" apps/desktop/dist/SHA256SUMS
+          rm -f "$checksum_path"
+          test -s apps/desktop/dist/legal/COPYING
+          test -s apps/desktop/dist/legal/NOTICE.md
+          test -s apps/desktop/dist/legal/SOURCE-REVISION.txt
+          test -s apps/desktop/dist/legal/OPAP-source-${{ github.sha }}.tar.gz
+          test -s apps/desktop/dist/SHA256SUMS
+
       - name: Upload frontend build
         if: steps.frontend.outputs.present == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -348,10 +375,35 @@ jobs:
       - name: Build release binaries
         run: cargo build --workspace --all-features --release --locked
 
-      - name: Upload Rust binary
+      - name: Stage Rust binary with legal and source notices
+        shell: bash
+        run: |
+          mkdir -p target/opap-core-linux-x86_64
+          install -m 0755 target/release/opap-core target/opap-core-linux-x86_64/
+          install -m 0644 COPYING NOTICE.md ASSETS.md OSCAR_PROVENANCE.md target/opap-core-linux-x86_64/
+          git rev-parse HEAD > target/opap-core-linux-x86_64/SOURCE-REVISION.txt
+          git archive \
+            --format=tar.gz \
+            --prefix="OPAP-source-${{ github.sha }}/" \
+            --output="target/opap-core-linux-x86_64/OPAP-source-${{ github.sha }}.tar.gz" \
+            HEAD
+          (
+            cd target/opap-core-linux-x86_64
+            sha256sum \
+              ASSETS.md COPYING NOTICE.md OSCAR_PROVENANCE.md SOURCE-REVISION.txt \
+              "OPAP-source-${{ github.sha }}.tar.gz" opap-core \
+              > SHA256SUMS
+          )
+          test -s target/opap-core-linux-x86_64/COPYING
+          test -s target/opap-core-linux-x86_64/NOTICE.md
+          test -s target/opap-core-linux-x86_64/SOURCE-REVISION.txt
+          test -s target/opap-core-linux-x86_64/OPAP-source-${{ github.sha }}.tar.gz
+          test -s target/opap-core-linux-x86_64/SHA256SUMS
+
+      - name: Upload Rust binary and notices
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: opap-core-linux-x86_64-${{ github.sha }}
-          path: target/release/opap-core
+          path: target/opap-core-linux-x86_64
           if-no-files-found: error
           retention-days: 14

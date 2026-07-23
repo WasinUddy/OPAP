@@ -34,7 +34,10 @@
     "targets": "all",
     "licenseFile": "../../../COPYING",
     "resources": {
-      "../../../COPYING": "COPYING"
+      "../../../COPYING": "COPYING",
+      "../../../NOTICE.md": "NOTICE.md",
+      "../../../ASSETS.md": "ASSETS.md",
+      "../../../OSCAR_PROVENANCE.md": "OSCAR_PROVENANCE.md"
     },
     "icon": [
       "icons/32x32.png",
