@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "tools": {
+    "node": "22.17.1",
+    "pnpm": "11.15.1",
+    "rust": "1.97.1 (rust-toolchain.toml)"
+  },
+  "nodeDependencyScope": "production",
+  "excludedDevOnlyNodePackages": [
+    "stackback",
+    "vitest"
+  ],
+  "rustInventories": [
+    {
+      "label": "Rust workspace release",
+      "manifest": "Cargo.toml",
+      "targets": [
+        "x86_64-unknown-linux-gnu"
+      ]
+    },
+    {
+      "label": "Tauri native host",
+      "manifest": "apps/desktop/src-tauri/Cargo.toml",
+      "targets": [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin"
+      ]
+    }
+  ],
+  "nodeTargets": [
+    {
+      "label": "darwin-arm64",
+      "os": "darwin",
+      "cpu": "arm64"
+    },
+    {
+      "label": "darwin-x64",
+      "os": "darwin",
+      "cpu": "x64"
+    },
+    {
+      "label": "linux-x64-glibc",
+      "os": "linux",
+      "cpu": "x64",
+      "libc": "glibc"
+    }
+  ]
+}

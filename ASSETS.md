@@ -14,7 +14,9 @@ is included in the assets listed above.
 
 The interface also renders icons from the `lucide-react` package (ISC) and uses
 Mantine packages (MIT). Those packages are version-pinned by
-`apps/desktop/pnpm-lock.yaml`; their own distributed license files and the
-automated dependency-license report remain authoritative. Before distributing
-a build, inspect the produced artifact rather than treating this focused ledger
-as an exhaustive third-party notice file.
+`apps/desktop/pnpm-lock.yaml`; discovered dependency license and notice text is
+included in [`THIRD_PARTY_LICENSES.txt`](THIRD_PARTY_LICENSES.txt). Before
+distributing a build, inspect the produced artifact, pinned supplemental source
+evidence, and any explicitly unresolved exception in that generated file. The
+release gate remains blocked while an exception exists; this focused asset
+ledger is not an exhaustive third-party notice or a legal-compliance claim.

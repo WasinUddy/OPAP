@@ -1,0 +1,3 @@
+# Preserve version-pinned upstream license documents byte-for-byte. Their
+# original whitespace is part of the recorded SHA-256 provenance.
+.github/scripts/license-supplements/files/** -whitespace

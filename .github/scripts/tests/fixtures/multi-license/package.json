@@ -1,0 +1,10 @@
+{
+  "name": "fixture-multi-license",
+  "version": "1.2.3",
+  "license": "(MIT OR Apache-2.0)",
+  "homepage": "https://example.invalid/multi-license",
+  "repository": {
+    "type": "git",
+    "url": "git+https://example.invalid/multi-license.git"
+  }
+}

@@ -6,21 +6,43 @@ on:
     paths:
       - "**/Cargo.lock"
       - "**/Cargo.toml"
+      - "rust-toolchain.toml"
       - "apps/desktop/package.json"
       - "apps/desktop/pnpm-lock.yaml"
+      - "apps/desktop/pnpm-workspace.yaml"
       - "apps/desktop/package-lock.json"
       - ".github/deny.toml"
       - ".github/scripts/check-js-licenses.mjs"
+      - ".github/scripts/generate-third-party-licenses.mjs"
+      - ".github/scripts/license-supplements/**"
+      - ".github/scripts/prepare-third-party-node-dependencies.mjs"
+      - ".github/scripts/test-tauri-legal-resources.mjs"
+      - ".github/scripts/verify-license-supplement-sources.mjs"
+      - ".github/scripts/tests/**"
+      - ".github/scripts/third-party-targets.json"
+      - "apps/desktop/src-tauri/tauri.conf.json"
+      - "THIRD_PARTY_LICENSES.txt"
       - ".github/workflows/security.yml"
   pull_request:
     paths:
       - "**/Cargo.lock"
       - "**/Cargo.toml"
+      - "rust-toolchain.toml"
       - "apps/desktop/package.json"
       - "apps/desktop/pnpm-lock.yaml"
+      - "apps/desktop/pnpm-workspace.yaml"
       - "apps/desktop/package-lock.json"
       - ".github/deny.toml"
       - ".github/scripts/check-js-licenses.mjs"
+      - ".github/scripts/generate-third-party-licenses.mjs"
+      - ".github/scripts/license-supplements/**"
+      - ".github/scripts/prepare-third-party-node-dependencies.mjs"
+      - ".github/scripts/test-tauri-legal-resources.mjs"
+      - ".github/scripts/verify-license-supplement-sources.mjs"
+      - ".github/scripts/tests/**"
+      - ".github/scripts/third-party-targets.json"
+      - "apps/desktop/src-tauri/tauri.conf.json"
+      - "THIRD_PARTY_LICENSES.txt"
       - ".github/workflows/security.yml"
   schedule:
     - cron: "17 2 * * 1"
@@ -65,7 +87,7 @@ jobs:
       - name: Audit Rust dependencies
         uses: EmbarkStudios/cargo-deny-action@6c8f9facfa5047ec02d8485b6bf52b587b7777d1 # v2.0.18
         with:
-          rust-version: stable
+          rust-version: 1.97.1
           manifest-path: ${{ matrix.manifest }}
           arguments: ${{ matrix.arguments }}
           command: check

@@ -1,0 +1,573 @@
+{
+  "schemaVersion": 1,
+  "documents": [
+    {
+      "id": "alloc-stdlib-0.2.4-license",
+      "localPath": ".github/scripts/license-supplements/files/alloc-stdlib-0.2.4-LICENSE.txt",
+      "expectedSha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae",
+      "classification": "license-terms",
+      "provenance": {
+        "repository": "https://github.com/dropbox/rust-alloc-no-stdlib",
+        "revision": "ae42d22078b98549e987d2f03d12df7b984fde47",
+        "path": "LICENSE",
+        "url": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/ae42d22078b98549e987d2f03d12df7b984fde47/LICENSE"
+      }
+    },
+    {
+      "id": "objc2-b4167-notice",
+      "localPath": ".github/scripts/license-supplements/files/objc2-LICENSE.md",
+      "expectedSha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+      "classification": "notice",
+      "provenance": {
+        "repository": "https://github.com/madsmtm/objc2",
+        "revision": "b4167b582b2f75f9a1be75495c41b765344fd03c",
+        "path": "LICENSE.md",
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/b4167b582b2f75f9a1be75495c41b765344fd03c/LICENSE.md"
+      }
+    },
+    {
+      "id": "objc2-8852-notice",
+      "localPath": ".github/scripts/license-supplements/files/objc2-LICENSE.md",
+      "expectedSha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+      "classification": "notice",
+      "provenance": {
+        "repository": "https://github.com/madsmtm/objc2",
+        "revision": "8852b424193ca41602281b3d7540d7c8ed51e49a",
+        "path": "LICENSE.md",
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md"
+      }
+    },
+    {
+      "id": "objc2-7b1ab-notice",
+      "localPath": ".github/scripts/license-supplements/files/objc2-LICENSE.md",
+      "expectedSha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+      "classification": "notice",
+      "provenance": {
+        "repository": "https://github.com/madsmtm/objc2",
+        "revision": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+        "path": "LICENSE.md",
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md"
+      }
+    },
+    {
+      "id": "objc2-8d214-notice",
+      "localPath": ".github/scripts/license-supplements/files/objc2-LICENSE.md",
+      "expectedSha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+      "classification": "notice",
+      "provenance": {
+        "repository": "https://github.com/madsmtm/objc2",
+        "revision": "8d214f5477365ffcbcbb7de058c86ed9a518efb7",
+        "path": "LICENSE.md",
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.md"
+      }
+    },
+    {
+      "id": "spdx-3.27.0-mit",
+      "localPath": ".github/scripts/license-supplements/files/spdx-v3.27.0-MIT.txt",
+      "expectedSha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+      "classification": "license-terms",
+      "provenance": {
+        "repository": "https://github.com/spdx/license-list-data",
+        "revision": "d46e94e2c78ceede1cfc63cfa0396472d2798d4c",
+        "path": "text/MIT.txt",
+        "url": "https://raw.githubusercontent.com/spdx/license-list-data/d46e94e2c78ceede1cfc63cfa0396472d2798d4c/text/MIT.txt",
+        "note": "Canonical SPDX License List text pinned at tag v3.27.0."
+      }
+    },
+    {
+      "id": "spdx-3.27.0-apache-2.0",
+      "localPath": ".github/scripts/license-supplements/files/spdx-v3.27.0-Apache-2.0.txt",
+      "expectedSha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+      "classification": "license-terms",
+      "provenance": {
+        "repository": "https://github.com/spdx/license-list-data",
+        "revision": "d46e94e2c78ceede1cfc63cfa0396472d2798d4c",
+        "path": "text/Apache-2.0.txt",
+        "url": "https://raw.githubusercontent.com/spdx/license-list-data/d46e94e2c78ceede1cfc63cfa0396472d2798d4c/text/Apache-2.0.txt",
+        "note": "Canonical SPDX License List text pinned at tag v3.27.0."
+      }
+    },
+    {
+      "id": "spdx-3.27.0-zlib",
+      "localPath": ".github/scripts/license-supplements/files/spdx-v3.27.0-Zlib.txt",
+      "expectedSha256": "bfb1112d49db5b1daecdfef24bd7e2f3ea0bafb33aa67aa0ab51e2bf8407c03d",
+      "classification": "license-terms",
+      "provenance": {
+        "repository": "https://github.com/spdx/license-list-data",
+        "revision": "d46e94e2c78ceede1cfc63cfa0396472d2798d4c",
+        "path": "text/Zlib.txt",
+        "url": "https://raw.githubusercontent.com/spdx/license-list-data/d46e94e2c78ceede1cfc63cfa0396472d2798d4c/text/Zlib.txt",
+        "note": "Canonical SPDX License List text pinned at tag v3.27.0."
+      }
+    },
+    {
+      "id": "spdx-3.27.0-mpl-2.0",
+      "localPath": ".github/scripts/license-supplements/files/spdx-v3.27.0-MPL-2.0.txt",
+      "expectedSha256": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172",
+      "classification": "license-terms",
+      "provenance": {
+        "repository": "https://github.com/spdx/license-list-data",
+        "revision": "d46e94e2c78ceede1cfc63cfa0396472d2798d4c",
+        "path": "text/MPL-2.0.txt",
+        "url": "https://raw.githubusercontent.com/spdx/license-list-data/d46e94e2c78ceede1cfc63cfa0396472d2798d4c/text/MPL-2.0.txt",
+        "note": "Canonical SPDX License List text pinned at tag v3.27.0."
+      }
+    },
+    {
+      "id": "rust-unic-58786-apache",
+      "localPath": ".github/scripts/license-supplements/files/rust-unic-LICENSE-APACHE.txt",
+      "expectedSha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+      "classification": "license-terms",
+      "provenance": {
+        "repository": "https://github.com/open-i18n/rust-unic",
+        "revision": "5878605364af97a3358368a6eaef02104af2e016",
+        "path": "LICENSE-APACHE",
+        "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE"
+      }
+    },
+    {
+      "id": "rust-unic-58786-mit",
+      "localPath": ".github/scripts/license-supplements/files/rust-unic-LICENSE-MIT.txt",
+      "expectedSha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "classification": "license-terms",
+      "provenance": {
+        "repository": "https://github.com/open-i18n/rust-unic",
+        "revision": "5878605364af97a3358368a6eaef02104af2e016",
+        "path": "LICENSE-MIT",
+        "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT"
+      }
+    },
+    {
+      "id": "rust-unic-58786-copyright",
+      "localPath": ".github/scripts/license-supplements/files/rust-unic-COPYRIGHT.md",
+      "expectedSha256": "f5c342c49f3ac804f3e8e7bb62a8040a44c50d47bb36902b1abd13f66a1adf8b",
+      "classification": "notice",
+      "provenance": {
+        "repository": "https://github.com/open-i18n/rust-unic",
+        "revision": "5878605364af97a3358368a6eaef02104af2e016",
+        "path": "COPYRIGHT.md",
+        "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md"
+      }
+    },
+    {
+      "id": "rust-unic-8a6ce-apache",
+      "localPath": ".github/scripts/license-supplements/files/rust-unic-LICENSE-APACHE.txt",
+      "expectedSha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+      "classification": "license-terms",
+      "provenance": {
+        "repository": "https://github.com/open-i18n/rust-unic",
+        "revision": "8a6ce83063d90b91ae2ce59eddb803edd393fca9",
+        "path": "LICENSE-APACHE",
+        "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-APACHE"
+      }
+    },
+    {
+      "id": "rust-unic-8a6ce-mit",
+      "localPath": ".github/scripts/license-supplements/files/rust-unic-LICENSE-MIT.txt",
+      "expectedSha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "classification": "license-terms",
+      "provenance": {
+        "repository": "https://github.com/open-i18n/rust-unic",
+        "revision": "8a6ce83063d90b91ae2ce59eddb803edd393fca9",
+        "path": "LICENSE-MIT",
+        "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-MIT"
+      }
+    },
+    {
+      "id": "rust-unic-8a6ce-copyright",
+      "localPath": ".github/scripts/license-supplements/files/rust-unic-COPYRIGHT.md",
+      "expectedSha256": "f5c342c49f3ac804f3e8e7bb62a8040a44c50d47bb36902b1abd13f66a1adf8b",
+      "classification": "notice",
+      "provenance": {
+        "repository": "https://github.com/open-i18n/rust-unic",
+        "revision": "8a6ce83063d90b91ae2ce59eddb803edd393fca9",
+        "path": "COPYRIGHT.md",
+        "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/COPYRIGHT.md"
+      }
+    },
+    {
+      "id": "tauri-plugin-2.6.3-apache",
+      "localPath": ".github/scripts/license-supplements/files/tauri-2.6.3-LICENSE-APACHE-2.0.txt",
+      "expectedSha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594",
+      "classification": "license-terms",
+      "provenance": {
+        "repository": "https://github.com/tauri-apps/tauri",
+        "revision": "6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a",
+        "path": "LICENSE_APACHE-2.0",
+        "url": "https://raw.githubusercontent.com/tauri-apps/tauri/6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a/LICENSE_APACHE-2.0"
+      }
+    },
+    {
+      "id": "tauri-plugin-2.6.3-mit",
+      "localPath": ".github/scripts/license-supplements/files/tauri-2.6.3-LICENSE-MIT.txt",
+      "expectedSha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d",
+      "classification": "license-terms",
+      "provenance": {
+        "repository": "https://github.com/tauri-apps/tauri",
+        "revision": "6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a",
+        "path": "LICENSE_MIT",
+        "url": "https://raw.githubusercontent.com/tauri-apps/tauri/6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a/LICENSE_MIT"
+      }
+    },
+    {
+      "id": "react-remove-scroll-bar-author-license",
+      "localPath": ".github/scripts/license-supplements/files/react-remove-scroll-bar-LICENSE.txt",
+      "expectedSha256": "a79aae0c0f21990d9d963bb3c5a79cdcea9a46f8523ba55c58d7fe776b6ebc84",
+      "classification": "license-terms",
+      "provenance": {
+        "repository": "https://github.com/theKashey/react-remove-scroll-bar",
+        "revision": "7301c160fda44cb8cf2b9fdfde61efad35736196",
+        "path": "LICENSE",
+        "url": "https://raw.githubusercontent.com/theKashey/react-remove-scroll-bar/7301c160fda44cb8cf2b9fdfde61efad35736196/LICENSE",
+        "note": "Later upstream license clarification by the same author named in the pinned 2.3.8 npm artifact."
+      }
+    }
+  ],
+  "packages": [
+    {
+      "packageKey": "cargo:alloc-stdlib@0.2.4",
+      "expectedLicenseExpression": "BSD-3-Clause",
+      "release": {
+        "repository": "https://github.com/dropbox/rust-alloc-no-stdlib",
+        "revision": "ae42d22078b98549e987d2f03d12df7b984fde47"
+      },
+      "documents": [
+        "alloc-stdlib-0.2.4-license"
+      ]
+    },
+    {
+      "packageKey": "cargo:siphasher@1.0.3",
+      "expectedLicenseExpression": "MIT OR Apache-2.0",
+      "release": {
+        "repository": "https://github.com/jedisct1/rust-siphash",
+        "revision": "451f67d73a772cba325728109bbfa247750ed076",
+        "note": "The annotated 1.0.3 tag dereferences to this source commit; its COPYING file declares the MIT or Apache-2.0 choice but references terms omitted from the crate and release tree."
+      },
+      "documents": [
+        "spdx-3.27.0-mit",
+        "spdx-3.27.0-apache-2.0"
+      ],
+      "installedEvidence": [
+        {
+          "relativePath": "COPYING",
+          "expectedSourceSha256": "c962ee4d1d05ddc138b202b2540219ebc57893fcf97b364852094a9a94ce1365",
+          "extraction": "full-text",
+          "label": "installed exact-version COPYING license-choice pointer"
+        }
+      ]
+    },
+    {
+      "packageKey": "cargo:block2@0.6.2",
+      "expectedLicenseExpression": "MIT",
+      "release": {
+        "repository": "https://github.com/madsmtm/objc2",
+        "revision": "b4167b582b2f75f9a1be75495c41b765344fd03c"
+      },
+      "documents": [
+        "objc2-b4167-notice",
+        "spdx-3.27.0-mit"
+      ]
+    },
+    {
+      "packageKey": "cargo:dispatch2@0.3.1",
+      "expectedLicenseExpression": "MIT OR Apache-2.0 OR Zlib",
+      "release": {
+        "repository": "https://github.com/madsmtm/objc2",
+        "revision": "8852b424193ca41602281b3d7540d7c8ed51e49a"
+      },
+      "documents": [
+        "objc2-8852-notice",
+        "spdx-3.27.0-mit",
+        "spdx-3.27.0-apache-2.0",
+        "spdx-3.27.0-zlib"
+      ]
+    },
+    {
+      "packageKey": "cargo:objc2@0.6.4",
+      "expectedLicenseExpression": "MIT",
+      "release": {
+        "repository": "https://github.com/madsmtm/objc2",
+        "revision": "8852b424193ca41602281b3d7540d7c8ed51e49a"
+      },
+      "documents": [
+        "objc2-8852-notice",
+        "spdx-3.27.0-mit"
+      ]
+    },
+    {
+      "packageKey": "cargo:objc2-encode@4.1.0",
+      "expectedLicenseExpression": "MIT",
+      "release": {
+        "repository": "https://github.com/madsmtm/objc2",
+        "revision": "8d214f5477365ffcbcbb7de058c86ed9a518efb7"
+      },
+      "documents": [
+        "objc2-8d214-notice",
+        "spdx-3.27.0-mit"
+      ]
+    },
+    {
+      "packageKey": "cargo:objc2-exception-helper@0.1.1",
+      "expectedLicenseExpression": "MIT OR Apache-2.0 OR Zlib",
+      "release": {
+        "repository": "https://github.com/madsmtm/objc2",
+        "revision": "8d214f5477365ffcbcbb7de058c86ed9a518efb7"
+      },
+      "documents": [
+        "objc2-8d214-notice",
+        "spdx-3.27.0-mit",
+        "spdx-3.27.0-apache-2.0",
+        "spdx-3.27.0-zlib"
+      ]
+    },
+    {
+      "packageKey": "cargo:objc2-app-kit@0.3.2",
+      "expectedLicenseExpression": "MIT OR Apache-2.0 OR Zlib",
+      "release": {
+        "repository": "https://github.com/madsmtm/objc2",
+        "revision": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b"
+      },
+      "documents": [
+        "objc2-7b1ab-notice",
+        "spdx-3.27.0-mit",
+        "spdx-3.27.0-apache-2.0",
+        "spdx-3.27.0-zlib"
+      ]
+    },
+    {
+      "packageKey": "cargo:objc2-core-foundation@0.3.2",
+      "expectedLicenseExpression": "MIT OR Apache-2.0 OR Zlib",
+      "release": {
+        "repository": "https://github.com/madsmtm/objc2",
+        "revision": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b"
+      },
+      "documents": [
+        "objc2-7b1ab-notice",
+        "spdx-3.27.0-mit",
+        "spdx-3.27.0-apache-2.0",
+        "spdx-3.27.0-zlib"
+      ]
+    },
+    {
+      "packageKey": "cargo:objc2-core-graphics@0.3.2",
+      "expectedLicenseExpression": "MIT OR Apache-2.0 OR Zlib",
+      "release": {
+        "repository": "https://github.com/madsmtm/objc2",
+        "revision": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b"
+      },
+      "documents": [
+        "objc2-7b1ab-notice",
+        "spdx-3.27.0-mit",
+        "spdx-3.27.0-apache-2.0",
+        "spdx-3.27.0-zlib"
+      ]
+    },
+    {
+      "packageKey": "cargo:objc2-foundation@0.3.2",
+      "expectedLicenseExpression": "MIT",
+      "release": {
+        "repository": "https://github.com/madsmtm/objc2",
+        "revision": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b"
+      },
+      "documents": [
+        "objc2-7b1ab-notice",
+        "spdx-3.27.0-mit"
+      ]
+    },
+    {
+      "packageKey": "cargo:objc2-io-surface@0.3.2",
+      "expectedLicenseExpression": "MIT OR Apache-2.0 OR Zlib",
+      "release": {
+        "repository": "https://github.com/madsmtm/objc2",
+        "revision": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b"
+      },
+      "documents": [
+        "objc2-7b1ab-notice",
+        "spdx-3.27.0-mit",
+        "spdx-3.27.0-apache-2.0",
+        "spdx-3.27.0-zlib"
+      ]
+    },
+    {
+      "packageKey": "cargo:objc2-web-kit@0.3.2",
+      "expectedLicenseExpression": "MIT OR Apache-2.0 OR Zlib",
+      "release": {
+        "repository": "https://github.com/madsmtm/objc2",
+        "revision": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b"
+      },
+      "documents": [
+        "objc2-7b1ab-notice",
+        "spdx-3.27.0-mit",
+        "spdx-3.27.0-apache-2.0",
+        "spdx-3.27.0-zlib"
+      ]
+    },
+    {
+      "packageKey": "cargo:selectors@0.36.1",
+      "expectedLicenseExpression": "MPL-2.0",
+      "release": {
+        "repository": "https://github.com/servo/stylo",
+        "revision": "635e1a19d02960588a00e189bd4bd5bdb150ec3d"
+      },
+      "documents": [
+        "spdx-3.27.0-mpl-2.0"
+      ],
+      "installedEvidence": [
+        {
+          "relativePath": "lib.rs",
+          "expectedSourceSha256": "d54c6e13e9e952dac17d209171df8657e3cae93beaddace4906150cdec8d02e9",
+          "extraction": "leading-comment",
+          "label": "crate MPL-2.0 source header"
+        }
+      ]
+    },
+    {
+      "packageKey": "cargo:unic-char-property@0.9.0",
+      "expectedLicenseExpression": "MIT OR Apache-2.0",
+      "release": {
+        "repository": "https://github.com/open-i18n/rust-unic",
+        "revision": "5878605364af97a3358368a6eaef02104af2e016"
+      },
+      "documents": [
+        "rust-unic-58786-apache",
+        "rust-unic-58786-mit",
+        "rust-unic-58786-copyright"
+      ],
+      "installedEvidence": [
+        {
+          "relativePath": "src/lib.rs",
+          "expectedSourceSha256": "200af9360e201caaa404fea0c8ec5387fa3ead07f8c056adf56d869768b0201b",
+          "extraction": "leading-comment",
+          "label": "crate license header"
+        }
+      ]
+    },
+    {
+      "packageKey": "cargo:unic-char-range@0.9.0",
+      "expectedLicenseExpression": "MIT OR Apache-2.0",
+      "release": {
+        "repository": "https://github.com/open-i18n/rust-unic",
+        "revision": "5878605364af97a3358368a6eaef02104af2e016"
+      },
+      "documents": [
+        "rust-unic-58786-apache",
+        "rust-unic-58786-mit",
+        "rust-unic-58786-copyright"
+      ],
+      "installedEvidence": [
+        {
+          "relativePath": "src/lib.rs",
+          "expectedSourceSha256": "955ee0b9069740fd1ee724943562f9189b7eb29b49d79c8c352a6f193c12c3ec",
+          "extraction": "leading-comment",
+          "label": "crate license header"
+        }
+      ]
+    },
+    {
+      "packageKey": "cargo:unic-common@0.9.0",
+      "expectedLicenseExpression": "MIT OR Apache-2.0",
+      "release": {
+        "repository": "https://github.com/open-i18n/rust-unic",
+        "revision": "5878605364af97a3358368a6eaef02104af2e016"
+      },
+      "documents": [
+        "rust-unic-58786-apache",
+        "rust-unic-58786-mit",
+        "rust-unic-58786-copyright"
+      ],
+      "installedEvidence": [
+        {
+          "relativePath": "src/lib.rs",
+          "expectedSourceSha256": "726d922245ebdf3bc474d48edf032b9af7fe24fc79ee17d87e2d295103e39ea0",
+          "extraction": "leading-comment",
+          "label": "crate license header"
+        }
+      ]
+    },
+    {
+      "packageKey": "cargo:unic-ucd-version@0.9.0",
+      "expectedLicenseExpression": "MIT OR Apache-2.0",
+      "release": {
+        "repository": "https://github.com/open-i18n/rust-unic",
+        "revision": "5878605364af97a3358368a6eaef02104af2e016"
+      },
+      "documents": [
+        "rust-unic-58786-apache",
+        "rust-unic-58786-mit",
+        "rust-unic-58786-copyright"
+      ],
+      "installedEvidence": [
+        {
+          "relativePath": "src/lib.rs",
+          "expectedSourceSha256": "51d52da8220e430f32523aa5972708e698fca29fea8b64a4cbdc67d3d1830f37",
+          "extraction": "leading-comment",
+          "label": "crate license header"
+        }
+      ]
+    },
+    {
+      "packageKey": "cargo:unic-ucd-ident@0.9.0",
+      "expectedLicenseExpression": "MIT OR Apache-2.0",
+      "release": {
+        "repository": "https://github.com/open-i18n/rust-unic",
+        "revision": "8a6ce83063d90b91ae2ce59eddb803edd393fca9"
+      },
+      "documents": [
+        "rust-unic-8a6ce-apache",
+        "rust-unic-8a6ce-mit",
+        "rust-unic-8a6ce-copyright"
+      ],
+      "installedEvidence": [
+        {
+          "relativePath": "src/lib.rs",
+          "expectedSourceSha256": "b855a13e55e654ea7e19c5d4ac0cf2fe17653ad6cae8d3559d35d041619c1fea",
+          "extraction": "leading-comment",
+          "label": "crate license header"
+        }
+      ]
+    },
+    {
+      "packageKey": "cargo:tauri-plugin@2.6.3",
+      "expectedLicenseExpression": "MIT OR Apache-2.0",
+      "release": {
+        "repository": "https://github.com/tauri-apps/tauri",
+        "revision": "6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a"
+      },
+      "documents": [
+        "tauri-plugin-2.6.3-apache",
+        "tauri-plugin-2.6.3-mit"
+      ]
+    },
+    {
+      "packageKey": "npm:react-remove-scroll-bar@2.3.8",
+      "expectedLicenseExpression": "MIT",
+      "release": {
+        "sourceUrl": "https://registry.npmjs.org/react-remove-scroll-bar/-/react-remove-scroll-bar-2.3.8.tgz",
+        "revision": "sha512-9r+yi9+mgU33AKcj6IbT9oRCO78WriSj6t/cF8DWBZJ9aOGPOTEDvdUDz1FwKim7QXWwmHqtdHnRJfhAxEG46Q==",
+        "note": "Pinned npm registry artifact and published Subresource Integrity value; the same artifact declares MIT and identifies Anton Korzunov."
+      },
+      "documents": [
+        "react-remove-scroll-bar-author-license"
+      ],
+      "installedEvidence": [
+        {
+          "relativePath": "README.md",
+          "expectedSourceSha256": "486442209236ffa3893312e508694699a6b8834d30a2f9c083c1f3379983e4f9",
+          "extraction": "markdown-heading",
+          "heading": "License",
+          "label": "installed README license section"
+        },
+        {
+          "relativePath": "package.json",
+          "expectedSourceSha256": "e372f857ce05f266137c65293436b5380fec42ac311e6acb9378ed78b98d75d0",
+          "extraction": "json-fields",
+          "fields": [
+            "author",
+            "license"
+          ],
+          "label": "installed package author and license fields"
+        }
+      ]
+    }
+  ]
+}

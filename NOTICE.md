@@ -37,6 +37,16 @@ The selected OSCAR reference and the scope of translated behavior are recorded
 in [`OSCAR_PROVENANCE.md`](OSCAR_PROVENANCE.md), [`PORTING.md`](PORTING.md),
 and [`compat/oscar-code-revision.txt`](compat/oscar-code-revision.txt).
 Checked-in visual-asset origins are recorded in [`ASSETS.md`](ASSETS.md).
+The generated [`THIRD_PARTY_LICENSES.txt`](THIRD_PARTY_LICENSES.txt) records the
+resolved Cargo and production pnpm runtime package names, versions, declared
+license expressions, upstream links, and discovered license/notice text used
+by the supported Linux-x64 and macOS arm64/x64 distributions. Dev-only build
+and test dependencies are not represented as shipped runtime components. When
+an exact published payload
+omits referenced terms, that file includes locally checked supplemental text
+pinned to an immutable upstream revision and SHA-256. Any unresolved
+missing-text exception is called out explicitly and causes the release
+verification gate to fail.
 
 This notice is a project distribution record, not legal advice and not a claim
 that any particular package has completed every release review.

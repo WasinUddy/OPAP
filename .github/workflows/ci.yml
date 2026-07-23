@@ -17,6 +17,53 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  third-party-notices:
+    name: Deterministic third-party notices
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.97.1
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        with:
+          package_json_file: apps/desktop/package.json
+          run_install: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.17.1
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+
+      - name: Install dependency payloads used by notice generation
+        shell: bash
+        run: |
+          cargo fetch --manifest-path Cargo.toml --locked --target x86_64-unknown-linux-gnu
+          cargo fetch --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --target aarch64-apple-darwin
+          cargo fetch --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --target x86_64-apple-darwin
+          node .github/scripts/prepare-third-party-node-dependencies.mjs
+
+      - name: Test notice generator and Tauri legal resources
+        run: |
+          node --test .github/scripts/tests/generate-third-party-licenses.test.mjs
+          node .github/scripts/test-tauri-legal-resources.mjs
+
+      - name: Verify pinned supplemental sources
+        run: node .github/scripts/verify-license-supplement-sources.mjs
+
+      - name: Verify checked-in notice is current
+        run: node .github/scripts/generate-third-party-licenses.mjs --check
+
   rust-format:
     name: Rust formatting
     runs-on: ubuntu-24.04
@@ -28,8 +75,9 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
+          toolchain: 1.97.1
           components: rustfmt
 
       - name: Check formatting
@@ -46,8 +94,9 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
+          toolchain: 1.97.1
           components: clippy
 
       - name: Restore Rust cache
@@ -69,7 +118,9 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.97.1
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
@@ -90,8 +141,9 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
+          toolchain: 1.97.1
           components: clippy
           targets: wasm32-unknown-unknown
 
@@ -118,8 +170,9 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
+          toolchain: 1.97.1
           components: clippy, rustfmt
 
       - name: Restore compatibility-harness cache
@@ -162,8 +215,9 @@ jobs:
 
       - name: Install Rust toolchain
         if: steps.acceptance.outputs.present == 'true'
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
+          toolchain: 1.97.1
           components: clippy, rustfmt
 
       - name: Restore Rust cache
@@ -183,6 +237,7 @@ jobs:
 
   frontend:
     name: Frontend lint, typecheck, unit tests, and build
+    needs: [third-party-notices]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -265,7 +320,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p apps/desktop/dist/legal
-          install -m 0644 COPYING NOTICE.md ASSETS.md OSCAR_PROVENANCE.md apps/desktop/dist/legal/
+          install -m 0644 \
+            COPYING NOTICE.md ASSETS.md OSCAR_PROVENANCE.md THIRD_PARTY_LICENSES.txt \
+            apps/desktop/dist/legal/
           git rev-parse HEAD > apps/desktop/dist/legal/SOURCE-REVISION.txt
           git archive \
             --format=tar.gz \
@@ -283,6 +340,7 @@ jobs:
           rm -f "$checksum_path"
           test -s apps/desktop/dist/legal/COPYING
           test -s apps/desktop/dist/legal/NOTICE.md
+          test -s apps/desktop/dist/legal/THIRD_PARTY_LICENSES.txt
           test -s apps/desktop/dist/legal/SOURCE-REVISION.txt
           test -s apps/desktop/dist/legal/OPAP-source-${{ github.sha }}.tar.gz
           test -s apps/desktop/dist/SHA256SUMS
@@ -298,6 +356,7 @@ jobs:
 
   desktop-native:
     name: Native desktop host (macOS)
+    needs: [third-party-notices]
     runs-on: macos-14
     timeout-minutes: 60
     steps:
@@ -307,8 +366,9 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
+          toolchain: 1.97.1
           components: clippy, rustfmt
 
       - name: Restore native host Rust cache
@@ -346,16 +406,42 @@ jobs:
           cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml
           --locked --all-targets --all-features -- -D warnings
 
-      - name: Compile native developer binary (no bundle)
+      - name: Build unsigned debug app bundle
         working-directory: apps/desktop
         env:
           OPAP_BUILD_REVISION: ${{ github.sha }}
           VITE_OPAP_SOURCE_REVISION: ${{ github.sha }}
-        run: pnpm run tauri:build:debug
+        run: pnpm run tauri:bundle:debug
+
+      - name: Verify legal resources in the app bundle
+        shell: bash
+        run: |
+          app_path="$(
+            find apps/desktop/src-tauri/target/debug/bundle/macos \
+              -type d -name '*.app' -print -quit
+          )"
+          if [[ -z "$app_path" ]]; then
+            echo "::error::Tauri did not produce a macOS .app bundle"
+            exit 1
+          fi
+          for resource in \
+            COPYING NOTICE.md ASSETS.md OSCAR_PROVENANCE.md THIRD_PARTY_LICENSES.txt
+          do
+            bundled="$app_path/Contents/Resources/$resource"
+            test -s "$bundled"
+            cmp "$resource" "$bundled"
+          done
 
   rust-build:
     name: Build Rust release artifact
-    needs: [rust-format, rust-clippy, rust-test, rust-wasm, oscar-compat, cucumber]
+    needs:
+      - third-party-notices
+      - rust-format
+      - rust-clippy
+      - rust-test
+      - rust-wasm
+      - oscar-compat
+      - cucumber
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -365,7 +451,9 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.97.1
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
@@ -380,7 +468,9 @@ jobs:
         run: |
           mkdir -p target/opap-core-linux-x86_64
           install -m 0755 target/release/opap-core target/opap-core-linux-x86_64/
-          install -m 0644 COPYING NOTICE.md ASSETS.md OSCAR_PROVENANCE.md target/opap-core-linux-x86_64/
+          install -m 0644 \
+            COPYING NOTICE.md ASSETS.md OSCAR_PROVENANCE.md THIRD_PARTY_LICENSES.txt \
+            target/opap-core-linux-x86_64/
           git rev-parse HEAD > target/opap-core-linux-x86_64/SOURCE-REVISION.txt
           git archive \
             --format=tar.gz \
@@ -391,11 +481,13 @@ jobs:
             cd target/opap-core-linux-x86_64
             sha256sum \
               ASSETS.md COPYING NOTICE.md OSCAR_PROVENANCE.md SOURCE-REVISION.txt \
+              THIRD_PARTY_LICENSES.txt \
               "OPAP-source-${{ github.sha }}.tar.gz" opap-core \
               > SHA256SUMS
           )
           test -s target/opap-core-linux-x86_64/COPYING
           test -s target/opap-core-linux-x86_64/NOTICE.md
+          test -s target/opap-core-linux-x86_64/THIRD_PARTY_LICENSES.txt
           test -s target/opap-core-linux-x86_64/SOURCE-REVISION.txt
           test -s target/opap-core-linux-x86_64/OPAP-source-${{ github.sha }}.tar.gz
           test -s target/opap-core-linux-x86_64/SHA256SUMS

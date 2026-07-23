@@ -37,7 +37,8 @@
       "../../../COPYING": "COPYING",
       "../../../NOTICE.md": "NOTICE.md",
       "../../../ASSETS.md": "ASSETS.md",
-      "../../../OSCAR_PROVENANCE.md": "OSCAR_PROVENANCE.md"
+      "../../../OSCAR_PROVENANCE.md": "OSCAR_PROVENANCE.md",
+      "../../../THIRD_PARTY_LICENSES.txt": "THIRD_PARTY_LICENSES.txt"
     },
     "icon": [
       "icons/32x32.png",
