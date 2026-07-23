@@ -34,10 +34,13 @@
 //! parsed identification with a non-empty serial, and attempts to use only STR
 //! summary data that parses and matches that serial. A bad STR can be omitted
 //! while OSCAR continues with DATALOG detail files, so STR verification is not
-//! itself an unconditional `Open` rejection gate. OPAP still does not import
-//! STR summaries; the current detail slice emits BRP-backed partial sessions
-//! from validated, uncompressed BRP waveforms and attaches trustworthy
-//! uncompressed SAD/SA2 oximetry without treating it as therapy usage.
+//! itself an unconditional `Open` rejection gate. OPAP now imports
+//! serial-verified STR mask boundaries as source-selected therapy slices,
+//! including explicitly identified bounded repairs and summary-only sessions,
+//! and falls back softly to detail grouping when STR is unusable. It still does
+//! not attach STR settings or daily summary metrics. Validated uncompressed BRP
+//! waveforms and trustworthy SAD/SA2 oximetry can widen the session envelope
+//! without changing STR-reported therapy usage.
 
 use crate::domain::{DeviceInfo, ImportWarning, WarningSeverity};
 use crate::importer::{
@@ -75,9 +78,10 @@ pub use session_import::{
 pub use session_index::{
     RESMED_EDF_HEADER_MAX_BYTES, RESMED_SESSION_INDEX_MAX_ENTRIES,
     RESMED_SESSION_INDEX_MAX_PATH_BYTES, RESMED_SESSION_INDEX_SCHEMA_VERSION,
-    ResmedDeviceLocalTime, ResmedEdfHeaderSummary, ResmedSessionCandidate, ResmedSessionFile,
-    ResmedSessionFileKind, ResmedSessionFileScope, ResmedSessionIndex, ResmedTimestampSource,
-    index_session_candidates, index_session_candidates_from_inventory,
+    ResmedDeviceLocalTime, ResmedEdfHeaderSummary, ResmedSessionAnchor, ResmedSessionCandidate,
+    ResmedSessionFile, ResmedSessionFileKind, ResmedSessionFileScope, ResmedSessionIndex,
+    ResmedTimestampSource, index_session_candidates, index_session_candidates_for_machine,
+    index_session_candidates_from_inventory, index_session_candidates_from_inventory_for_machine,
 };
 
 /// Stable identifier used by the ResMed importer.
@@ -141,8 +145,9 @@ pub struct CardDiscovery {
 
 /// Filesystem-independent ResMed importer.
 ///
-/// Discovery, inventory, bounded EDF header indexing, and an intentionally
-/// partial uncompressed BRP plus SAD/SA2 detail import are implemented.
+/// Discovery, inventory, serial-verified STR therapy intervals, bounded EDF
+/// header indexing, and an intentionally partial uncompressed BRP plus SAD/SA2
+/// detail import are implemented.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ResmedImporter;
 

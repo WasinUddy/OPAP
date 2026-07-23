@@ -13,12 +13,11 @@
 
 //! Bounded, filesystem-independent indexing of ResMed DATALOG session files.
 //!
-//! This module intentionally stops at a **pre-import heuristic** candidate
-//! manifest. OSCAR seeds session intervals from `STR.edf` mask-on/mask-off
-//! records before applying its EDF-duration overlap fallback; that STR mask
-//! seeding and `ScanFiles`' first-import date cutoff are not ported yet.
-//! Consequently these candidates must not be treated as imported sessions,
-//! and this module does not claim complete OSCAR parity.
+//! This module intentionally stops at a **pre-import** candidate manifest.
+//! Verified root `STR.edf` mask-on/mask-off records provide authoritative
+//! therapy anchors; days without an unambiguous usable STR interval retain
+//! OSCAR's EDF-duration overlap fallback. Candidates are still not imported
+//! sessions, and this module does not claim complete OSCAR parity.
 //!
 //! OSCAR rejects EDF header times later than the host clock. To keep this core
 //! deterministic and WebAssembly-compatible, callers supply the current
@@ -39,23 +38,31 @@
 //! reproducing OSCAR's iteration-dependent timestamp-map overwrite.
 
 use crate::{
-    ImportError, ImportErrorKind, ImportSource, ImportWarning, SourceEntry, SourceEntryKind,
-    SourceInventory, WarningSeverity,
+    DeviceLocalDateTime, ImportError, ImportErrorKind, ImportSource, ImportWarning, SourceEntry,
+    SourceEntryKind, SourceInventory, WarningSeverity,
 };
 use opap_edf::{EdfHeader, Parser};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use super::str::{
+    RESMED_STR_MAX_FILE_BYTES, StrBoundaryDiagnostics, StrBoundaryRepair, StrDecodeError,
+    decode_str,
+};
+
 const DATALOG_PREFIX: &str = "DATALOG/";
+const STR_EDF_PATH: &str = "STR.edf";
 const FIXED_EDF_HEADER_BYTES: usize = 256;
 const EDF_SIGNAL_HEADER_BYTES: usize = 256;
 const EDF_MAX_SIGNALS: usize = 256;
 const HEADER_FILENAME_DRIFT_SECONDS: i64 = 6 * 60 * 60;
 const EARLIEST_PLAUSIBLE_RESMED_YEAR: u16 = 2005;
 const MAX_INDEXED_EDF_DURATION_MILLIS: u64 = 7 * 24 * 60 * 60 * 1_000;
+const MAX_DAY_FILE_ASSOCIATIONS: usize = RESMED_SESSION_INDEX_MAX_ENTRIES;
+const MAX_FALLBACK_GROUP_COMPARISONS: usize = 4_000_000;
 
 /// Version of the serialized ResMed candidate-manifest contract.
-pub const RESMED_SESSION_INDEX_SCHEMA_VERSION: u16 = 2;
+pub const RESMED_SESSION_INDEX_SCHEMA_VERSION: u16 = 3;
 
 /// Largest prefix needed by the bounded EDF parser for 256 signal descriptors.
 pub const RESMED_EDF_HEADER_MAX_BYTES: usize =
@@ -180,10 +187,51 @@ pub struct ResmedSessionFile {
     pub timestamp_source: ResmedTimestampSource,
 }
 
-/// A deterministic heuristic group of recognized EDF files that may form one session.
+/// Source of the interval that anchors one ResMed candidate.
 ///
-/// This is not an imported session. OSCAR's preceding STR mask-on/mask-off
-/// interval seeding is not yet represented by this candidate index.
+/// The default preserves deserialization of schema-v2 manifests, whose
+/// candidates were all derived from detail-file duration grouping.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResmedSessionAnchor {
+    /// No trustworthy STR interval was available; detail grouping is heuristic.
+    #[default]
+    DetailFallback,
+    /// A serial-verified, non-overlapping STR mask-on/mask-off interval.
+    StrMask {
+        /// Local-noon ResMed therapy-day bucket.
+        therapy_day: String,
+        /// Selected nonnegative mask-on minute after local noon.
+        mask_on_minute: u16,
+        /// Selected mask-off minute after local noon.
+        ///
+        /// This can be a derived following-noon boundary when `repair` is
+        /// [`StrBoundaryRepair::HistoricalTrailingNoon`].
+        mask_off_minute: u16,
+        /// Original signed digital sample from the mask-on signal.
+        ///
+        /// Older schema-v3 manifests deserialize this as `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_mask_on_value: Option<i16>,
+        /// Original signed digital sample from the mask-off signal.
+        ///
+        /// Older schema-v3 manifests deserialize this as `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_mask_off_value: Option<i16>,
+        /// Selected authoritative device-local start.
+        start_time: ResmedDeviceLocalTime,
+        /// Selected authoritative device-local exclusive end.
+        end_time: ResmedDeviceLocalTime,
+        /// Bounded repair applied to the source samples, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repair: Option<StrBoundaryRepair>,
+    },
+}
+
+/// A deterministic group of recognized EDF files that may form one session.
+///
+/// This is not an imported session. [`ResmedSessionAnchor`] distinguishes
+/// authoritative STR intervals from the backward-compatible detail fallback.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResmedSessionCandidate {
     /// Heuristic identifier deterministic for the same inventory and algorithm.
@@ -201,14 +249,14 @@ pub struct ResmedSessionCandidate {
     /// Consumers must carry this field; they must not rederive it from the
     /// candidate ID or from a later UTC conversion.
     pub resmed_day: String,
+    /// Authoritative STR boundary or backward-compatible detail fallback.
+    #[serde(default)]
+    pub anchor: ResmedSessionAnchor,
     /// Session-specific files followed by shared day-wide annotations.
     pub files: Vec<ResmedSessionFile>,
 }
 
 /// Portable output of pre-import ResMed DATALOG candidate discovery.
-///
-/// Candidate grouping currently models OSCAR's EDF-duration overlap fallback,
-/// but not its primary STR mask-on/mask-off interval seeding.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResmedSessionIndex {
     /// Serialized contract version.
@@ -253,6 +301,7 @@ struct WorkingCandidate {
     interval_start_millis: i64,
     interval_end_millis: i64,
     resmed_day: String,
+    anchor: ResmedSessionAnchor,
     files: Vec<IndexedFile>,
 }
 
@@ -274,10 +323,11 @@ enum GroupMatch {
 
 /// Inventories a source and builds a bounded pre-import candidate manifest.
 ///
-/// The result is heuristic until STR mask-on/mask-off seeding is ported; it is
-/// not a session import result. `current_device_local_time` must be the host's
-/// current local wall clock expressed without a UTC offset, matching OSCAR's
-/// future-header check while keeping the portable core clock-independent.
+/// This compatibility entry point does not have a machine serial with which to
+/// verify STR identity, so it emits only detail-fallback candidates. Call
+/// [`index_session_candidates_for_machine`] when a trusted identification
+/// record is available. `current_device_local_time` must be the host's current
+/// local wall clock expressed without a UTC offset.
 ///
 /// # Errors
 ///
@@ -290,6 +340,31 @@ pub fn index_session_candidates(
 ) -> Result<ResmedSessionIndex, ImportError> {
     let inventory = source.inventory()?;
     index_session_candidates_from_inventory(source, &inventory, current_device_local_time)
+}
+
+/// Inventories a source and indexes verified STR boundaries for one machine.
+///
+/// A missing, malformed, ambiguous, or serial-mismatched STR file is a soft
+/// failure: the resulting manifest attempts bounded detail-fallback grouping.
+/// If that compatibility pass exhausts its comparison budget, it fails closed
+/// without suppressing any independently valid STR candidates.
+///
+/// # Errors
+///
+/// Returns an error for inventory-wide budget/configuration failures. Individual
+/// STR and detail-file failures are retained as warnings.
+pub fn index_session_candidates_for_machine(
+    source: &dyn ImportSource,
+    expected_serial: &str,
+    current_device_local_time: &ResmedDeviceLocalTime,
+) -> Result<ResmedSessionIndex, ImportError> {
+    let inventory = source.inventory()?;
+    index_session_candidates_from_inventory_for_machine(
+        source,
+        &inventory,
+        expected_serial,
+        current_device_local_time,
+    )
 }
 
 /// Builds a candidate manifest from an existing inventory and bounded prefixes.
@@ -306,6 +381,47 @@ pub fn index_session_candidates(
 pub fn index_session_candidates_from_inventory(
     source: &dyn ImportSource,
     inventory: &SourceInventory,
+    current_device_local_time: &ResmedDeviceLocalTime,
+) -> Result<ResmedSessionIndex, ImportError> {
+    index_session_candidates_from_inventory_impl(source, inventory, None, current_device_local_time)
+}
+
+/// Builds a candidate manifest with serial-verified STR interval anchors.
+///
+/// The supplied serial must come from the selected card's identification
+/// record. STR failures route otherwise-valid detail files through a bounded
+/// compatibility grouping pass, which is omitted atomically on budget
+/// exhaustion.
+///
+/// # Errors
+///
+/// Returns the same inventory/configuration errors as
+/// [`index_session_candidates_from_inventory`], plus
+/// [`ImportErrorKind::InvalidData`] for an empty expected serial.
+pub fn index_session_candidates_from_inventory_for_machine(
+    source: &dyn ImportSource,
+    inventory: &SourceInventory,
+    expected_serial: &str,
+    current_device_local_time: &ResmedDeviceLocalTime,
+) -> Result<ResmedSessionIndex, ImportError> {
+    if expected_serial.trim().is_empty() {
+        return Err(ImportError::new(
+            ImportErrorKind::InvalidData,
+            "ResMed STR indexing requires a non-empty expected serial",
+        ));
+    }
+    index_session_candidates_from_inventory_impl(
+        source,
+        inventory,
+        Some(expected_serial.trim()),
+        current_device_local_time,
+    )
+}
+
+fn index_session_candidates_from_inventory_impl(
+    source: &dyn ImportSource,
+    inventory: &SourceInventory,
+    expected_serial: Option<&str>,
     current_device_local_time: &ResmedDeviceLocalTime,
 ) -> Result<ResmedSessionIndex, ImportError> {
     if !valid_local_time(
@@ -390,7 +506,19 @@ pub fn index_session_candidates_from_inventory(
         }
     }
 
-    let mut candidates = group_session_files(session_files, &mut warnings);
+    let mut str_candidates = expected_serial.map_or_else(Vec::new, |serial| {
+        load_str_candidates(
+            source,
+            inventory,
+            serial,
+            current_device_local_time,
+            &mut warnings,
+        )
+    });
+    let unmatched_files =
+        attach_session_files_to_str_candidates(&mut str_candidates, session_files);
+    let mut candidates = str_candidates;
+    candidates.extend(group_session_files(unmatched_files, &mut warnings));
     attach_day_files(&mut candidates, day_files, &mut warnings);
     candidates.sort_by(|left, right| {
         left.interval_start_millis
@@ -789,17 +917,400 @@ fn select_start_time(
     )
 }
 
+fn load_str_candidates(
+    source: &dyn ImportSource,
+    inventory: &SourceInventory,
+    expected_serial: &str,
+    current_device_local_time: &ResmedDeviceLocalTime,
+    warnings: &mut Vec<ImportWarning>,
+) -> Vec<WorkingCandidate> {
+    let mut matching_entries = inventory
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == SourceEntryKind::File && entry.relative_path == STR_EDF_PATH);
+    let Some(entry) = matching_entries.next() else {
+        warnings.push(warning(
+            "resmed_str_missing",
+            "Root STR.edf is missing; bounded detail-file fallback grouping was attempted",
+            Some(STR_EDF_PATH),
+        ));
+        return Vec::new();
+    };
+    if matching_entries.next().is_some() {
+        warnings.push(warning(
+            "resmed_str_duplicate_source",
+            "Multiple root STR.edf inventory entries are ambiguous; bounded detail-file fallback grouping was attempted",
+            Some(STR_EDF_PATH),
+        ));
+        return Vec::new();
+    }
+    if entry.size_bytes > u64::try_from(RESMED_STR_MAX_FILE_BYTES).expect("STR byte limit fits u64")
+    {
+        warnings.push(warning(
+            "resmed_str_file_limit_exceeded",
+            format!(
+                "Root STR.edf exceeds the {RESMED_STR_MAX_FILE_BYTES}-byte input limit; bounded detail-file fallback grouping was attempted"
+            ),
+            Some(STR_EDF_PATH),
+        ));
+        return Vec::new();
+    }
+
+    let bytes = match source.read_file(STR_EDF_PATH, RESMED_STR_MAX_FILE_BYTES) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            warnings.push(warning(
+                "resmed_str_not_read",
+                "Root STR.edf could not be read within its bounded limit; bounded detail-file fallback grouping was attempted",
+                Some(STR_EDF_PATH),
+            ));
+            return Vec::new();
+        }
+    };
+    if u64::try_from(bytes.len()).ok() != Some(entry.size_bytes) {
+        warnings.push(warning(
+            "resmed_str_changed_during_index",
+            "Root STR.edf size changed after inventory; bounded detail-file fallback grouping was attempted",
+            Some(STR_EDF_PATH),
+        ));
+        return Vec::new();
+    }
+
+    let current_device_local_time = DeviceLocalDateTime {
+        year: current_device_local_time.year,
+        month: current_device_local_time.month,
+        day: current_device_local_time.day,
+        hour: current_device_local_time.hour,
+        minute: current_device_local_time.minute,
+        second: current_device_local_time.second,
+        millisecond: current_device_local_time.millisecond,
+    };
+    let decoded = match decode_str(&bytes, expected_serial, current_device_local_time) {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            push_str_decode_warning(error, warnings);
+            return Vec::new();
+        }
+    };
+    push_str_diagnostic_warnings(decoded.diagnostics, warnings);
+
+    let boundary_count = decoded
+        .days
+        .iter()
+        .try_fold(0usize, |count, day| count.checked_add(day.boundaries.len()))
+        .unwrap_or(usize::MAX);
+    if boundary_count > RESMED_SESSION_INDEX_MAX_ENTRIES {
+        warnings.push(warning(
+            "resmed_str_candidate_limit_exceeded",
+            format!(
+                "Root STR.edf contains more than {RESMED_SESSION_INDEX_MAX_ENTRIES} usable intervals; bounded detail-file fallback grouping was attempted"
+            ),
+            Some(STR_EDF_PATH),
+        ));
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+    if candidates.try_reserve_exact(boundary_count).is_err() {
+        warnings.push(warning(
+            "resmed_str_candidate_allocation_failed",
+            "Root STR.edf intervals could not be allocated safely; bounded detail-file fallback grouping was attempted",
+            Some(STR_EDF_PATH),
+        ));
+        return Vec::new();
+    }
+    for day in decoded.days {
+        let noon = ResmedDeviceLocalTime {
+            wall_time: format!(
+                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}",
+                day.local_noon.year,
+                day.local_noon.month,
+                day.local_noon.day,
+                day.local_noon.hour,
+                day.local_noon.minute,
+                day.local_noon.second,
+                day.local_noon.millisecond
+            ),
+            year: day.local_noon.year,
+            month: day.local_noon.month,
+            day: day.local_noon.day,
+            hour: day.local_noon.hour,
+            minute: day.local_noon.minute,
+            second: day.local_noon.second,
+            millisecond: day.local_noon.millisecond,
+        };
+        let noon_millis = local_millis(&noon);
+        let therapy_day = format!(
+            "{:04}-{:02}-{:02}",
+            day.local_noon.year, day.local_noon.month, day.local_noon.day
+        );
+        for boundary in day.boundaries {
+            let start_millis = noon_millis + i64::from(boundary.mask_on_minute) * 60_000;
+            let end_millis = noon_millis + i64::from(boundary.mask_off_minute) * 60_000;
+            let start_time = local_time_from_millis(start_millis);
+            let end_time = local_time_from_millis(end_millis);
+            candidates.push(WorkingCandidate {
+                interval_start_millis: start_millis,
+                interval_end_millis: end_millis,
+                resmed_day: therapy_day.clone(),
+                anchor: ResmedSessionAnchor::StrMask {
+                    therapy_day: therapy_day.clone(),
+                    mask_on_minute: boundary.mask_on_minute,
+                    mask_off_minute: boundary.mask_off_minute,
+                    source_mask_on_value: boundary.source_mask_on_value,
+                    source_mask_off_value: boundary.source_mask_off_value,
+                    start_time,
+                    end_time,
+                    repair: boundary.repair,
+                },
+                files: Vec::new(),
+            });
+        }
+    }
+    candidates.sort_by(|left, right| {
+        left.interval_start_millis
+            .cmp(&right.interval_start_millis)
+            .then_with(|| left.interval_end_millis.cmp(&right.interval_end_millis))
+    });
+    candidates
+}
+
+fn push_str_decode_warning(error: StrDecodeError, warnings: &mut Vec<ImportWarning>) {
+    let (code, message) = match error {
+        StrDecodeError::SerialMismatch => (
+            "resmed_str_serial_mismatch",
+            "Root STR.edf serial does not match the selected card; bounded detail-file fallback grouping was attempted",
+        ),
+        StrDecodeError::MissingSerial | StrDecodeError::AmbiguousSerial => (
+            "resmed_str_serial_ambiguous",
+            "Root STR.edf has no unique serial identity; bounded detail-file fallback grouping was attempted",
+        ),
+        StrDecodeError::MissingSignal(_)
+        | StrDecodeError::AmbiguousSignal(_)
+        | StrDecodeError::NonDigitalSignal(_)
+        | StrDecodeError::InvalidSamplesPerRecord { .. }
+        | StrDecodeError::MaskSampleCountMismatch { .. } => (
+            "resmed_str_signal_shape_rejected",
+            "Root STR.edf does not contain one supported boundary-signal set; bounded detail-file fallback grouping was attempted",
+        ),
+        StrDecodeError::FileTooLarge { .. } => (
+            "resmed_str_file_limit_exceeded",
+            "Root STR.edf exceeds its bounded input limit; bounded detail-file fallback grouping was attempted",
+        ),
+        StrDecodeError::AllocationFailed { .. } => (
+            "resmed_str_decode_allocation_failed",
+            "Root STR.edf could not be decoded within allocation bounds; bounded detail-file fallback grouping was attempted",
+        ),
+        _ => (
+            "resmed_str_not_decoded",
+            "Root STR.edf is malformed or unsupported; bounded detail-file fallback grouping was attempted",
+        ),
+    };
+    warnings.push(warning(code, message, Some(STR_EDF_PATH)));
+}
+
+fn push_str_diagnostic_warnings(
+    diagnostics: StrBoundaryDiagnostics,
+    warnings: &mut Vec<ImportWarning>,
+) {
+    let diagnostics = [
+        (
+            diagnostics.out_of_range_slots,
+            "resmed_str_out_of_range_boundaries",
+            "Out-of-range STR boundary slots were omitted",
+        ),
+        (
+            diagnostics.invalid_pair_slots,
+            "resmed_str_invalid_boundary_pairs",
+            "Invalid STR boundary pairs were omitted",
+        ),
+        (
+            diagnostics.unfinished_non_historical_slots,
+            "resmed_str_unfinished_boundaries",
+            "Unfinished current/future STR boundaries were omitted",
+        ),
+        (
+            diagnostics.future_boundary_slots,
+            "resmed_str_future_boundaries",
+            "STR boundaries later than the supplied device-local clock were omitted",
+        ),
+        (
+            diagnostics.repaired_historical_slots,
+            "resmed_str_repaired_boundaries",
+            "Historical unfinished STR boundaries were capped at the following noon",
+        ),
+        (
+            diagnostics.ambiguous_days,
+            "resmed_str_ambiguous_days",
+            "Ambiguous STR therapy days were excluded from interval seeding",
+        ),
+        (
+            diagnostics.mask_event_count_mismatch_days,
+            "resmed_str_mask_count_mismatch",
+            "STR mask-event counts disagreed with retained boundaries",
+        ),
+    ];
+    for (count, code, message) in diagnostics {
+        if count != 0 {
+            warnings.push(warning(
+                code,
+                format!("{message} ({count})"),
+                Some(STR_EDF_PATH),
+            ));
+        }
+    }
+}
+
+fn attach_session_files_to_str_candidates(
+    candidates: &mut [WorkingCandidate],
+    files: Vec<IndexedFile>,
+) -> Vec<IndexedFile> {
+    let mut candidates_by_day = BTreeMap::<String, Vec<usize>>::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        candidates_by_day
+            .entry(candidate.resmed_day.clone())
+            .or_default()
+            .push(index);
+    }
+    let mut unmatched = Vec::new();
+    for file in files {
+        if let Some(index) = find_str_candidate_match(&file, candidates, &candidates_by_day) {
+            candidates[index].files.push(file);
+        } else {
+            unmatched.push(file);
+        }
+    }
+    unmatched
+}
+
+fn find_str_candidate_match(
+    file: &IndexedFile,
+    candidates: &[WorkingCandidate],
+    candidates_by_day: &BTreeMap<String, Vec<usize>>,
+) -> Option<usize> {
+    let day_indices = candidates_by_day.get(&file.resmed_day)?;
+    let filename_position =
+        upper_bound_candidate_start(day_indices, candidates, file.filename_millis);
+    if let Some(&index) = filename_position
+        .checked_sub(1)
+        .and_then(|position| day_indices.get(position))
+    {
+        let candidate = &candidates[index];
+        if file.filename_millis < candidate.interval_end_millis {
+            return Some(index);
+        }
+    }
+
+    let file_end = file.grouping_end_millis?;
+    let overlap_position = lower_bound_candidate_start(day_indices, candidates, file_end);
+    let &index = overlap_position
+        .checked_sub(1)
+        .and_then(|position| day_indices.get(position))?;
+    (file.selected_millis < candidates[index].interval_end_millis).then_some(index)
+}
+
+fn upper_bound_candidate_start(
+    indices: &[usize],
+    candidates: &[WorkingCandidate],
+    value: i64,
+) -> usize {
+    binary_candidate_start(indices, candidates, value, true)
+}
+
+fn lower_bound_candidate_start(
+    indices: &[usize],
+    candidates: &[WorkingCandidate],
+    value: i64,
+) -> usize {
+    binary_candidate_start(indices, candidates, value, false)
+}
+
+fn binary_candidate_start(
+    indices: &[usize],
+    candidates: &[WorkingCandidate],
+    value: i64,
+    inclusive: bool,
+) -> usize {
+    binary_candidate_start_counted(indices, candidates, value, inclusive).0
+}
+
+fn binary_candidate_start_counted(
+    indices: &[usize],
+    candidates: &[WorkingCandidate],
+    value: i64,
+    inclusive: bool,
+) -> (usize, usize) {
+    let mut left = 0usize;
+    let mut right = indices.len();
+    let mut probes = 0usize;
+    while left < right {
+        probes += 1;
+        let middle = left + (right - left) / 2;
+        let candidate_start = candidates[indices[middle]].interval_start_millis;
+        let belongs_left = if inclusive {
+            candidate_start <= value
+        } else {
+            candidate_start < value
+        };
+        if belongs_left {
+            left = middle + 1;
+        } else {
+            right = middle;
+        }
+    }
+    (left, probes)
+}
+
 fn group_session_files(
     files: Vec<IndexedFile>,
     warnings: &mut Vec<ImportWarning>,
 ) -> Vec<WorkingCandidate> {
+    group_session_files_with_limit(files, warnings, MAX_FALLBACK_GROUP_COMPARISONS)
+}
+
+fn group_session_files_with_limit(
+    files: Vec<IndexedFile>,
+    warnings: &mut Vec<ImportWarning>,
+    comparison_limit: usize,
+) -> Vec<WorkingCandidate> {
+    let mut provisional_warnings = Vec::new();
+    match try_group_session_files(files, &mut provisional_warnings, comparison_limit) {
+        Ok(groups) => {
+            warnings.extend(provisional_warnings);
+            groups
+        }
+        Err(FallbackGroupingLimitExceeded) => {
+            warnings.push(warning(
+                "resmed_fallback_grouping_limit_exceeded",
+                format!(
+                    "Detail-fallback grouping exceeded the {comparison_limit}-comparison work limit; all detail-fallback candidates were omitted"
+                ),
+                None,
+            ));
+            Vec::new()
+        }
+    }
+}
+
+fn try_group_session_files(
+    files: Vec<IndexedFile>,
+    warnings: &mut Vec<ImportWarning>,
+    comparison_limit: usize,
+) -> Result<Vec<WorkingCandidate>, FallbackGroupingLimitExceeded> {
     let (mut bounded, mut unbounded): (Vec<_>, Vec<_>) = files
         .into_iter()
         .partition(|file| file.grouping_end_millis.is_some());
     bounded.sort_by(indexed_file_order);
     let mut groups: Vec<WorkingCandidate> = Vec::new();
+    let mut groups_by_day = BTreeMap::<String, Vec<usize>>::new();
+    let mut comparison_budget = FallbackGroupingBudget::new(comparison_limit);
     for file in bounded {
-        if let Some((index, match_kind)) = find_group_match(&file, &groups) {
+        let day_groups = groups_by_day
+            .get(&file.resmed_day)
+            .map_or(&[][..], Vec::as_slice);
+        if let Some((index, match_kind)) =
+            find_group_match(&file, &groups, day_groups, &mut comparison_budget)?
+        {
             let group = &mut groups[index];
             if match_kind == GroupMatch::DurationOverlap {
                 group.interval_start_millis = group.interval_start_millis.min(file.selected_millis);
@@ -809,12 +1320,19 @@ fn group_session_files(
             }
             group.files.push(file);
         } else if file.grouping_end_millis != Some(file.selected_millis) {
+            let group_index = groups.len();
+            let resmed_day = file.resmed_day.clone();
             groups.push(WorkingCandidate {
                 interval_start_millis: file.selected_millis,
                 interval_end_millis: file.grouping_end_millis.expect("bounded file has an end"),
-                resmed_day: file.resmed_day.clone(),
+                resmed_day: resmed_day.clone(),
+                anchor: ResmedSessionAnchor::DetailFallback,
                 files: vec![file],
             });
+            groups_by_day
+                .entry(resmed_day)
+                .or_default()
+                .push(group_index);
         } else {
             warn_point_file_without_session(&file, warnings);
         }
@@ -822,7 +1340,12 @@ fn group_session_files(
 
     unbounded.sort_by(indexed_file_order);
     for file in unbounded {
-        if let Some((index, _)) = find_group_match(&file, &groups) {
+        let day_groups = groups_by_day
+            .get(&file.resmed_day)
+            .map_or(&[][..], Vec::as_slice);
+        if let Some((index, _)) =
+            find_group_match(&file, &groups, day_groups, &mut comparison_budget)?
+        {
             groups[index].files.push(file);
         } else {
             warnings.push(warning(
@@ -832,34 +1355,67 @@ fn group_session_files(
             ));
         }
     }
-    groups
+    Ok(groups)
 }
 
 fn find_group_match(
     file: &IndexedFile,
     groups: &[WorkingCandidate],
-) -> Option<(usize, GroupMatch)> {
+    day_groups: &[usize],
+    comparison_budget: &mut FallbackGroupingBudget,
+) -> Result<Option<(usize, GroupMatch)>, FallbackGroupingLimitExceeded> {
     // OSCAR's primary pass walks mask/fallback intervals forward and assigns a
     // file by its filename timestamp without expanding that interval.
-    if let Some(index) = groups.iter().position(|group| {
-        file.resmed_day == group.resmed_day
-            && file.filename_millis >= group.interval_start_millis
+    for &index in day_groups {
+        comparison_budget.consume()?;
+        let group = &groups[index];
+        debug_assert_eq!(file.resmed_day, group.resmed_day);
+        if file.filename_millis >= group.interval_start_millis
             && file.filename_millis < group.interval_end_millis
-    }) {
-        return Some((index, GroupMatch::FilenameWithinInterval));
+        {
+            return Ok(Some((index, GroupMatch::FilenameWithinInterval)));
+        }
     }
 
     // Only the duration-overlap fallback walks in reverse and expands the
     // chosen interval. There is deliberately no generic filename-lag cutoff.
-    let file_end = file.grouping_end_millis?;
-    groups
-        .iter()
-        .rposition(|group| {
-            file.resmed_day == group.resmed_day
-                && group.interval_start_millis < file_end
-                && file.selected_millis < group.interval_end_millis
-        })
-        .map(|index| (index, GroupMatch::DurationOverlap))
+    let Some(file_end) = file.grouping_end_millis else {
+        return Ok(None);
+    };
+    for &index in day_groups.iter().rev() {
+        comparison_budget.consume()?;
+        let group = &groups[index];
+        debug_assert_eq!(file.resmed_day, group.resmed_day);
+        if group.interval_start_millis < file_end
+            && file.selected_millis < group.interval_end_millis
+        {
+            return Ok(Some((index, GroupMatch::DurationOverlap)));
+        }
+    }
+    Ok(None)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FallbackGroupingLimitExceeded;
+
+struct FallbackGroupingBudget {
+    remaining_comparisons: usize,
+}
+
+impl FallbackGroupingBudget {
+    const fn new(comparison_limit: usize) -> Self {
+        Self {
+            remaining_comparisons: comparison_limit,
+        }
+    }
+
+    fn consume(&mut self) -> Result<(), FallbackGroupingLimitExceeded> {
+        self.remaining_comparisons = self
+            .remaining_comparisons
+            .checked_sub(1)
+            .ok_or(FallbackGroupingLimitExceeded)?;
+        Ok(())
+    }
 }
 
 fn warn_point_file_without_session(file: &IndexedFile, warnings: &mut Vec<ImportWarning>) {
@@ -884,68 +1440,169 @@ fn warn_point_file_without_session(file: &IndexedFile, warnings: &mut Vec<Import
 
 fn attach_day_files(
     candidates: &mut [WorkingCandidate],
-    mut day_files: Vec<IndexedFile>,
+    day_files: Vec<IndexedFile>,
     warnings: &mut Vec<ImportWarning>,
 ) {
+    attach_day_files_with_limit(candidates, day_files, warnings, MAX_DAY_FILE_ASSOCIATIONS);
+}
+
+fn attach_day_files_with_limit(
+    candidates: &mut [WorkingCandidate],
+    mut day_files: Vec<IndexedFile>,
+    warnings: &mut Vec<ImportWarning>,
+    association_limit: usize,
+) {
+    let mut candidates_by_day = BTreeMap::<String, Vec<usize>>::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        candidates_by_day
+            .entry(candidate.resmed_day.clone())
+            .or_default()
+            .push(index);
+    }
     day_files.sort_by(indexed_file_order);
+    let mut files_by_day = BTreeMap::<String, Vec<IndexedFile>>::new();
     for file in day_files {
-        let mut attached = false;
-        for candidate in candidates
-            .iter_mut()
-            .filter(|candidate| candidate.resmed_day == file.resmed_day)
-        {
-            candidate.files.push(file.clone());
-            attached = true;
-        }
-        if !attached {
+        if candidates_by_day.contains_key(&file.resmed_day) {
+            files_by_day
+                .entry(file.resmed_day.clone())
+                .or_default()
+                .push(file);
+        } else {
             warnings.push(warning(
                 "daywide_edf_without_session",
-                "Day-wide EVE/CSL file has no validated BRP/PLD/SAD/SA2 session candidate",
+                "Day-wide EVE/CSL file has no STR or validated detail session candidate",
                 Some(&file.file.relative_path),
             ));
+        }
+    }
+
+    let required_associations = files_by_day.iter().try_fold(0usize, |total, (day, files)| {
+        let candidate_count = candidates_by_day.get(day).map_or(0, Vec::len);
+        candidate_count
+            .checked_mul(files.len())
+            .and_then(|count| total.checked_add(count))
+    });
+    if required_associations.is_none_or(|count| count > association_limit) {
+        warnings.push(warning(
+            "resmed_daywide_association_limit_exceeded",
+            format!(
+                "Day-wide EVE/CSL attachment exceeds the {association_limit}-association output limit; day-wide files were omitted"
+            ),
+            files_by_day
+                .values()
+                .flatten()
+                .next()
+                .map(|file| file.file.relative_path.as_str()),
+        ));
+        return;
+    }
+
+    for (day, files) in &files_by_day {
+        for &candidate_index in &candidates_by_day[day] {
+            if candidates[candidate_index]
+                .files
+                .try_reserve_exact(files.len())
+                .is_err()
+            {
+                warnings.push(warning(
+                    "resmed_daywide_association_allocation_failed",
+                    "Day-wide EVE/CSL attachment could not be allocated safely; day-wide files were omitted",
+                    files
+                        .first()
+                        .map(|file| file.file.relative_path.as_str()),
+                ));
+                return;
+            }
+        }
+    }
+    for (day, files) in files_by_day {
+        for &candidate_index in &candidates_by_day[&day] {
+            candidates[candidate_index]
+                .files
+                .extend(files.iter().cloned());
         }
     }
 }
 
 fn finalize_candidate(mut candidate: WorkingCandidate) -> ResmedSessionCandidate {
     candidate.files.sort_by(indexed_file_order);
-    let start_millis = candidate
-        .files
-        .iter()
-        .filter(|file| file.file.scope == ResmedSessionFileScope::Session)
-        .map(|file| file.selected_millis)
-        .min()
-        .expect("candidate has at least one session-specific file");
-    let estimated_end_millis = candidate
-        .files
-        .iter()
-        .filter(|file| file.file.scope == ResmedSessionFileScope::Session)
-        .filter_map(|file| file.estimated_end_millis)
-        .max();
-    let start_time = local_time_from_millis(start_millis);
-    let source_filename = candidate
-        .files
-        .iter()
-        .filter(|file| file.file.scope == ResmedSessionFileScope::Session)
-        .filter_map(|file| file.file.relative_path.rsplit('/').next())
-        .map(str::to_owned)
-        .min()
-        .expect("candidate has at least one session-specific file");
-    let id = format!(
-        "resmed-local-{:04}{:02}{:02}-{:02}{:02}{:02}-file-{}",
-        start_time.year,
-        start_time.month,
-        start_time.day,
-        start_time.hour,
-        start_time.minute,
-        start_time.second,
-        hex_identifier_component(&source_filename)
-    );
+    let (id, start_time, estimated_end_time) = match &candidate.anchor {
+        ResmedSessionAnchor::DetailFallback => {
+            let start_millis = candidate
+                .files
+                .iter()
+                .filter(|file| file.file.scope == ResmedSessionFileScope::Session)
+                .map(|file| file.selected_millis)
+                .min()
+                .expect("fallback candidate has at least one session-specific file");
+            let estimated_end_millis = candidate
+                .files
+                .iter()
+                .filter(|file| file.file.scope == ResmedSessionFileScope::Session)
+                .filter_map(|file| file.estimated_end_millis)
+                .max();
+            let start_time = local_time_from_millis(start_millis);
+            let source_filename = candidate
+                .files
+                .iter()
+                .filter(|file| file.file.scope == ResmedSessionFileScope::Session)
+                .filter_map(|file| file.file.relative_path.rsplit('/').next())
+                .map(str::to_owned)
+                .min()
+                .expect("fallback candidate has at least one session-specific file");
+            let id = format!(
+                "resmed-local-{:04}{:02}{:02}-{:02}{:02}{:02}-file-{}",
+                start_time.year,
+                start_time.month,
+                start_time.day,
+                start_time.hour,
+                start_time.minute,
+                start_time.second,
+                hex_identifier_component(&source_filename)
+            );
+            (
+                id,
+                start_time,
+                estimated_end_millis.map(local_time_from_millis),
+            )
+        }
+        ResmedSessionAnchor::StrMask {
+            therapy_day,
+            mask_on_minute,
+            start_time,
+            end_time,
+            ..
+        } => {
+            let authoritative_start_millis = local_millis(start_time);
+            let authoritative_end_millis = local_millis(end_time);
+            let envelope_start_millis = candidate
+                .files
+                .iter()
+                .filter(|file| file.file.scope == ResmedSessionFileScope::Session)
+                .map(|file| file.selected_millis)
+                .fold(authoritative_start_millis, i64::min);
+            let envelope_end_millis = candidate
+                .files
+                .iter()
+                .filter(|file| file.file.scope == ResmedSessionFileScope::Session)
+                .filter_map(|file| file.estimated_end_millis)
+                .fold(authoritative_end_millis, i64::max);
+            (
+                format!(
+                    "resmed-str-mask-{}-{mask_on_minute:04}",
+                    therapy_day.replace('-', "")
+                ),
+                local_time_from_millis(envelope_start_millis),
+                Some(local_time_from_millis(envelope_end_millis)),
+            )
+        }
+    };
     ResmedSessionCandidate {
         id,
         start_time,
-        estimated_end_time: estimated_end_millis.map(local_time_from_millis),
+        estimated_end_time,
         resmed_day: candidate.resmed_day,
+        anchor: candidate.anchor,
         files: candidate.files.into_iter().map(|file| file.file).collect(),
     }
 }
@@ -1274,6 +1931,17 @@ mod tests {
         super::index_session_candidates_from_inventory(source, inventory, &fixture_current_time())
     }
 
+    fn index_session_candidates_for_machine(
+        source: &dyn ImportSource,
+        expected_serial: &str,
+    ) -> Result<ResmedSessionIndex, ImportError> {
+        super::index_session_candidates_for_machine(
+            source,
+            expected_serial,
+            &fixture_current_time(),
+        )
+    }
+
     impl MemorySource {
         fn insert(&mut self, path: &str, bytes: Vec<u8>) {
             self.entries.push(SourceEntry {
@@ -1282,6 +1950,14 @@ mod tests {
                 size_bytes: u64::try_from(bytes.len()).expect("fixture length"),
             });
             self.files.insert(path.to_owned(), bytes);
+        }
+
+        fn insert_directory(&mut self, path: &str) {
+            self.entries.push(SourceEntry {
+                relative_path: path.to_owned(),
+                kind: SourceEntryKind::Directory,
+                size_bytes: 0,
+            });
         }
     }
 
@@ -1317,6 +1993,475 @@ mod tests {
             })?;
             Ok(bytes[..bytes.len().min(max_bytes)].to_vec())
         }
+    }
+
+    #[test]
+    fn schema_v3_anchor_is_typed_and_schema_v2_candidates_default_to_detail_fallback() {
+        let mut source = MemorySource::default();
+        source.insert(
+            "DATALOG/20260101_220000_BRP.edf",
+            synthetic_edf("01.01.26", "22.00.00", 60, "1"),
+        );
+        let index = index_session_candidates(&source).expect("candidate index");
+        assert_eq!(index.schema_version, 3);
+        assert_eq!(
+            index.candidates[0].anchor,
+            ResmedSessionAnchor::DetailFallback
+        );
+
+        let mut legacy = serde_json::to_value(&index).expect("serialize manifest");
+        legacy["schema_version"] = serde_json::json!(2);
+        legacy["candidates"][0]
+            .as_object_mut()
+            .expect("candidate object")
+            .remove("anchor");
+        let decoded: ResmedSessionIndex =
+            serde_json::from_value(legacy).expect("schema-v2 manifest remains readable");
+        assert_eq!(decoded.schema_version, 2);
+        assert_eq!(
+            decoded.candidates[0].anchor,
+            ResmedSessionAnchor::DetailFallback
+        );
+
+        let anchor = ResmedSessionAnchor::StrMask {
+            therapy_day: "2026-01-01".to_owned(),
+            mask_on_minute: 600,
+            mask_off_minute: 660,
+            source_mask_on_value: Some(600),
+            source_mask_off_value: Some(660),
+            start_time: local_time(2026, 1, 1, 22, 0, 0, 0),
+            end_time: local_time(2026, 1, 1, 23, 0, 0, 0),
+            repair: None,
+        };
+        let mut legacy_anchor = serde_json::to_value(anchor).expect("serialize v3 anchor");
+        let object = legacy_anchor.as_object_mut().expect("anchor object");
+        object.remove("source_mask_on_value");
+        object.remove("source_mask_off_value");
+        object.remove("repair");
+        let decoded: ResmedSessionAnchor =
+            serde_json::from_value(legacy_anchor).expect("earlier v3 anchor remains readable");
+        let ResmedSessionAnchor::StrMask {
+            source_mask_on_value,
+            source_mask_off_value,
+            repair,
+            ..
+        } = decoded
+        else {
+            panic!("typed STR anchor");
+        };
+        assert_eq!(source_mask_on_value, None);
+        assert_eq!(source_mask_off_value, None);
+        assert_eq!(repair, None);
+    }
+
+    #[test]
+    fn verified_str_creates_summary_candidate_with_exact_raw_anchor() {
+        let mut source = MemorySource::default();
+        source.insert_directory("DATALOG");
+        source.insert("STR.edf", synthetic_str("serial-123", &[600], &[660]));
+
+        let index = index_session_candidates_for_machine(&source, "serial-123").expect("STR index");
+        assert!(index.warnings.is_empty());
+        assert_eq!(index.candidates.len(), 1);
+        let candidate = &index.candidates[0];
+        assert!(candidate.files.is_empty());
+        assert_eq!(candidate.id, "resmed-str-mask-20260101-0600");
+        assert_eq!(candidate.resmed_day, "2026-01-01");
+        assert_eq!(candidate.start_time.wall_time, "2026-01-01T22:00:00");
+        assert_eq!(
+            candidate
+                .estimated_end_time
+                .as_ref()
+                .expect("STR end")
+                .wall_time,
+            "2026-01-01T23:00:00"
+        );
+        assert_eq!(
+            candidate.anchor,
+            ResmedSessionAnchor::StrMask {
+                therapy_day: "2026-01-01".to_owned(),
+                mask_on_minute: 600,
+                mask_off_minute: 660,
+                source_mask_on_value: Some(600),
+                source_mask_off_value: Some(660),
+                start_time: local_time(2026, 1, 1, 22, 0, 0, 0),
+                end_time: local_time(2026, 1, 1, 23, 0, 0, 0),
+                repair: None,
+            }
+        );
+    }
+
+    #[test]
+    fn repaired_str_anchor_preserves_source_values_and_selected_boundary_provenance() {
+        let mut source = MemorySource::default();
+        source.insert_directory("DATALOG");
+        source.insert("STR.edf", synthetic_str("serial-123", &[600], &[0]));
+
+        let index = index_session_candidates_for_machine(&source, "serial-123").expect("STR index");
+        assert_eq!(index.candidates.len(), 1);
+        assert_eq!(
+            index.candidates[0].anchor,
+            ResmedSessionAnchor::StrMask {
+                therapy_day: "2026-01-01".to_owned(),
+                mask_on_minute: 600,
+                mask_off_minute: 1_440,
+                source_mask_on_value: Some(600),
+                source_mask_off_value: Some(0),
+                start_time: local_time(2026, 1, 1, 22, 0, 0, 0),
+                end_time: local_time(2026, 1, 2, 12, 0, 0, 0),
+                repair: Some(StrBoundaryRepair::HistoricalTrailingNoon),
+            }
+        );
+        assert!(
+            index
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "resmed_str_repaired_boundaries")
+        );
+    }
+
+    #[test]
+    fn str_filename_ownership_is_half_open_and_never_expands_transitively() {
+        let mut source = MemorySource::default();
+        source.insert(
+            "STR.edf",
+            synthetic_str("serial-123", &[540, 660], &[660, 780]),
+        );
+        source.insert(
+            "DATALOG/20260101_213000_BRP.edf",
+            synthetic_edf("01.01.26", "21.30.00", 10_800, "1"),
+        );
+        source.insert(
+            "DATALOG/20260101_230000_PLD.edf",
+            synthetic_edf("01.01.26", "23.00.00", 60, "1"),
+        );
+
+        let index = index_session_candidates_for_machine(&source, "serial-123").expect("STR index");
+        assert_eq!(index.candidates.len(), 2);
+        assert_eq!(
+            index.candidates[0]
+                .files
+                .iter()
+                .map(|file| file.kind)
+                .collect::<Vec<_>>(),
+            [ResmedSessionFileKind::Brp]
+        );
+        assert_eq!(
+            index.candidates[1]
+                .files
+                .iter()
+                .map(|file| file.kind)
+                .collect::<Vec<_>>(),
+            [ResmedSessionFileKind::Pld]
+        );
+        let ResmedSessionAnchor::StrMask {
+            mask_on_minute,
+            mask_off_minute,
+            ..
+        } = index.candidates[0].anchor
+        else {
+            panic!("first candidate must remain STR anchored");
+        };
+        assert_eq!((mask_on_minute, mask_off_minute), (540, 660));
+    }
+
+    #[test]
+    fn str_candidate_lookup_uses_logarithmic_day_bucket_probes() {
+        let candidates: Vec<_> = (0..1_024)
+            .map(|index| WorkingCandidate {
+                interval_start_millis: i64::from(index) * 10,
+                interval_end_millis: i64::from(index) * 10 + 5,
+                resmed_day: "2026-01-01".to_owned(),
+                anchor: ResmedSessionAnchor::DetailFallback,
+                files: Vec::new(),
+            })
+            .collect();
+        let indices: Vec<_> = (0..candidates.len()).collect();
+        let (position, probes) = binary_candidate_start_counted(&indices, &candidates, 5_000, true);
+        assert_eq!(position, 501);
+        assert!(
+            probes <= 11,
+            "1,024 candidates should require at most 11 binary probes"
+        );
+    }
+
+    #[test]
+    fn binary_str_ownership_matches_forward_filename_then_reverse_overlap_reference() {
+        fn candidate(day: &str, start: i64, end: i64) -> WorkingCandidate {
+            WorkingCandidate {
+                interval_start_millis: start,
+                interval_end_millis: end,
+                resmed_day: day.to_owned(),
+                anchor: ResmedSessionAnchor::DetailFallback,
+                files: Vec::new(),
+            }
+        }
+        fn file(day: &str, filename: i64, selected: i64, end: Option<i64>) -> IndexedFile {
+            let time = local_time(2026, 1, 1, 12, 0, 0, 0);
+            IndexedFile {
+                file: ResmedSessionFile {
+                    relative_path: "DATALOG/reference_BRP.edf".to_owned(),
+                    size_bytes: 512,
+                    kind: ResmedSessionFileKind::Brp,
+                    scope: ResmedSessionFileScope::Session,
+                    filename_start_time: time.clone(),
+                    edf_header: None,
+                    selected_start_time: time,
+                    timestamp_source: ResmedTimestampSource::Filename,
+                },
+                filename_millis: filename,
+                selected_millis: selected,
+                grouping_end_millis: end,
+                estimated_end_millis: end,
+                resmed_day: day.to_owned(),
+            }
+        }
+        fn linear_reference(file: &IndexedFile, candidates: &[WorkingCandidate]) -> Option<usize> {
+            if let Some(index) = candidates.iter().position(|candidate| {
+                file.resmed_day == candidate.resmed_day
+                    && file.filename_millis >= candidate.interval_start_millis
+                    && file.filename_millis < candidate.interval_end_millis
+            }) {
+                return Some(index);
+            }
+            let file_end = file.grouping_end_millis?;
+            candidates.iter().rposition(|candidate| {
+                file.resmed_day == candidate.resmed_day
+                    && candidate.interval_start_millis < file_end
+                    && file.selected_millis < candidate.interval_end_millis
+            })
+        }
+
+        let candidates = vec![
+            candidate("2026-01-01", 100, 200),
+            candidate("2026-01-01", 300, 400),
+            candidate("2026-01-02", 100, 200),
+        ];
+        let mut by_day = BTreeMap::<String, Vec<usize>>::new();
+        for (index, candidate) in candidates.iter().enumerate() {
+            by_day
+                .entry(candidate.resmed_day.clone())
+                .or_default()
+                .push(index);
+        }
+        let cases = [
+            file("2026-01-01", 100, 100, Some(101)),
+            file("2026-01-01", 199, 199, Some(400)),
+            file("2026-01-01", 200, 200, None),
+            file("2026-01-01", 300, 300, Some(301)),
+            file("2026-01-01", 250, 150, Some(350)),
+            file("2026-01-01", 250, 150, Some(300)),
+            file("2026-01-01", 250, 200, Some(300)),
+            file("2026-01-02", 150, 150, Some(151)),
+            file("2026-01-03", 150, 150, Some(151)),
+        ];
+        for case in cases {
+            assert_eq!(
+                find_str_candidate_match(&case, &candidates, &by_day),
+                linear_reference(&case, &candidates),
+                "binary ownership diverged for {case:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_grouping_budget_is_global_exact_and_all_or_none() {
+        fn fallback_file(
+            path: &str,
+            filename_millis: i64,
+            selected_millis: i64,
+            grouping_end_millis: Option<i64>,
+        ) -> IndexedFile {
+            let time = local_time(2026, 1, 1, 12, 0, 0, 0);
+            IndexedFile {
+                file: ResmedSessionFile {
+                    relative_path: path.to_owned(),
+                    size_bytes: 512,
+                    kind: ResmedSessionFileKind::Brp,
+                    scope: ResmedSessionFileScope::Session,
+                    filename_start_time: time.clone(),
+                    edf_header: None,
+                    selected_start_time: time,
+                    timestamp_source: ResmedTimestampSource::Filename,
+                },
+                filename_millis,
+                selected_millis,
+                grouping_end_millis,
+                estimated_end_millis: grouping_end_millis,
+                resmed_day: "2026-01-01".to_owned(),
+            }
+        }
+
+        let files = vec![
+            fallback_file("DATALOG/a_BRP.edf", 0, 0, Some(10)),
+            fallback_file("DATALOG/b_BRP.edf", 15, 15, Some(15)),
+            fallback_file("DATALOG/c_BRP.edf", 20, 20, Some(30)),
+            fallback_file("DATALOG/d_BRP.edf", 5, 5, None),
+        ];
+
+        // a creates the first group without a comparison. The zero-duration b
+        // and bounded c each consume one forward plus one reverse comparison;
+        // unbounded d consumes the fifth comparison in the forward scan.
+        let mut exact_warnings = Vec::new();
+        let exact = group_session_files_with_limit(files.clone(), &mut exact_warnings, 5);
+        assert_eq!(exact.len(), 2);
+        assert_eq!(exact[0].files.len(), 2);
+        assert_eq!(exact[1].files.len(), 1);
+        assert_eq!(exact_warnings.len(), 1);
+        assert_eq!(exact_warnings[0].code, "zero_duration_session_edf");
+        let exact_manifest: Vec<_> = exact.into_iter().map(finalize_candidate).collect();
+
+        let mut reference_warnings = Vec::new();
+        let reference =
+            group_session_files_with_limit(files.clone(), &mut reference_warnings, usize::MAX);
+        let reference_manifest: Vec<_> = reference.into_iter().map(finalize_candidate).collect();
+        assert_eq!(exact_manifest, reference_manifest);
+        assert_eq!(exact_warnings, reference_warnings);
+
+        let retained_str = WorkingCandidate {
+            interval_start_millis: 100,
+            interval_end_millis: 200,
+            resmed_day: "2026-01-02".to_owned(),
+            anchor: ResmedSessionAnchor::StrMask {
+                therapy_day: "2026-01-02".to_owned(),
+                mask_on_minute: 0,
+                mask_off_minute: 1,
+                source_mask_on_value: Some(0),
+                source_mask_off_value: Some(1),
+                start_time: local_time(2026, 1, 2, 12, 0, 0, 0),
+                end_time: local_time(2026, 1, 2, 12, 1, 0, 0),
+                repair: None,
+            },
+            files: Vec::new(),
+        };
+        let mut candidates = vec![retained_str];
+        let mut exceeded_warnings = vec![warning(
+            "existing_warning",
+            "A diagnostic produced before fallback grouping",
+            Some("DATALOG/existing.edf"),
+        )];
+        candidates.extend(group_session_files_with_limit(
+            files,
+            &mut exceeded_warnings,
+            4,
+        ));
+        assert_eq!(candidates.len(), 1, "verified STR candidate is retained");
+        assert!(matches!(
+            candidates[0].anchor,
+            ResmedSessionAnchor::StrMask { .. }
+        ));
+        assert_eq!(
+            exceeded_warnings
+                .iter()
+                .map(|warning| warning.code.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "existing_warning",
+                "resmed_fallback_grouping_limit_exceeded"
+            ]
+        );
+        assert_eq!(exceeded_warnings[1].relative_path, None);
+        assert!(
+            exceeded_warnings[1]
+                .message
+                .contains("4-comparison work limit")
+        );
+    }
+
+    #[test]
+    fn daywide_attachment_is_all_or_none_at_checked_output_limit() {
+        fn candidates() -> Vec<WorkingCandidate> {
+            (0..2)
+                .map(|index| WorkingCandidate {
+                    interval_start_millis: i64::from(index) * 10,
+                    interval_end_millis: i64::from(index) * 10 + 5,
+                    resmed_day: "2026-01-01".to_owned(),
+                    anchor: ResmedSessionAnchor::DetailFallback,
+                    files: Vec::new(),
+                })
+                .collect()
+        }
+        fn day_file(path: &str) -> IndexedFile {
+            let time = local_time(2026, 1, 1, 12, 0, 0, 0);
+            IndexedFile {
+                file: ResmedSessionFile {
+                    relative_path: path.to_owned(),
+                    size_bytes: 512,
+                    kind: ResmedSessionFileKind::Eve,
+                    scope: ResmedSessionFileScope::ResmedDay,
+                    filename_start_time: time.clone(),
+                    edf_header: None,
+                    selected_start_time: time,
+                    timestamp_source: ResmedTimestampSource::Filename,
+                },
+                filename_millis: 0,
+                selected_millis: 0,
+                grouping_end_millis: None,
+                estimated_end_millis: None,
+                resmed_day: "2026-01-01".to_owned(),
+            }
+        }
+        let files = vec![
+            day_file("DATALOG/20260101_120000_EVE.edf"),
+            day_file("DATALOG/20260101_120001_EVE.edf"),
+        ];
+
+        let mut rejected = candidates();
+        let mut warnings = Vec::new();
+        attach_day_files_with_limit(&mut rejected, files.clone(), &mut warnings, 3);
+        assert!(rejected.iter().all(|candidate| candidate.files.is_empty()));
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.code == "resmed_daywide_association_limit_exceeded")
+        );
+
+        let mut accepted = candidates();
+        let mut warnings = Vec::new();
+        attach_day_files_with_limit(&mut accepted, files, &mut warnings, 4);
+        assert!(warnings.is_empty());
+        assert!(accepted.iter().all(|candidate| candidate.files.len() == 2));
+    }
+
+    #[test]
+    fn mismatched_or_duplicate_str_preserves_exact_detail_fallback_candidates() {
+        let mut mismatched = MemorySource::default();
+        mismatched.insert("STR.edf", synthetic_str("other-card", &[600], &[660]));
+        mismatched.insert(
+            "DATALOG/20260101_220000_BRP.edf",
+            synthetic_edf("01.01.26", "22.00.00", 60, "1"),
+        );
+        let expected = index_session_candidates(&mismatched).expect("detail fallback reference");
+        let actual = index_session_candidates_for_machine(&mismatched, "serial-123")
+            .expect("mismatched STR soft fallback");
+        assert_eq!(actual.candidates, expected.candidates);
+        assert!(
+            actual
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "resmed_str_serial_mismatch")
+        );
+
+        let mut duplicate = mismatched;
+        duplicate.files.insert(
+            "STR.edf".to_owned(),
+            synthetic_str("serial-123", &[600, 600], &[630, 660]),
+        );
+        let entry = duplicate
+            .entries
+            .iter_mut()
+            .find(|entry| entry.relative_path == "STR.edf")
+            .expect("STR inventory entry");
+        entry.size_bytes = u64::try_from(duplicate.files["STR.edf"].len()).expect("fixture size");
+        let actual = index_session_candidates_for_machine(&duplicate, "serial-123")
+            .expect("duplicate mask-on soft fallback");
+        assert_eq!(actual.candidates, expected.candidates);
+        assert!(
+            actual
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "resmed_str_ambiguous_days")
+        );
     }
 
     #[test]
@@ -2237,6 +3382,75 @@ mod tests {
         let index = index_session_candidates(&source).expect("header-only index");
         assert_eq!(index.candidates.len(), 1);
         assert!(index.warnings.is_empty());
+    }
+
+    fn synthetic_str(serial: &str, mask_on: &[i16], mask_off: &[i16]) -> Vec<u8> {
+        assert_eq!(mask_on.len(), mask_off.len());
+        assert!(!mask_on.is_empty());
+        let signal_labels = ["Mask On", "Mask Off", "Mask Events"];
+        let samples_per_record = [mask_on.len(), mask_off.len(), 1];
+        let header_bytes = 256 + signal_labels.len() * 256;
+        let mut bytes = Vec::new();
+        for (value, width) in [
+            ("0".to_owned(), 8),
+            ("patient".to_owned(), 80),
+            (format!("ResMed SRN={serial}"), 80),
+            ("01.01.2612.00.00".to_owned(), 16),
+            (header_bytes.to_string(), 8),
+            (String::new(), 44),
+            ("1".to_owned(), 8),
+            ("86400".to_owned(), 8),
+            (signal_labels.len().to_string(), 4),
+        ] {
+            bytes.extend(padded_field(&value, width));
+        }
+        for label in signal_labels {
+            bytes.extend(padded_field(label, 16));
+        }
+        for _ in signal_labels {
+            bytes.extend(padded_field("", 80));
+        }
+        for _ in signal_labels {
+            bytes.extend(padded_field("raw", 8));
+        }
+        for _ in signal_labels {
+            bytes.extend(padded_field("-32768", 8));
+        }
+        for _ in signal_labels {
+            bytes.extend(padded_field("32767", 8));
+        }
+        for _ in signal_labels {
+            bytes.extend(padded_field("-32768", 8));
+        }
+        for _ in signal_labels {
+            bytes.extend(padded_field("32767", 8));
+        }
+        for _ in signal_labels {
+            bytes.extend(padded_field("", 80));
+        }
+        for count in samples_per_record {
+            bytes.extend(padded_field(&count.to_string(), 8));
+        }
+        for _ in signal_labels {
+            bytes.extend(padded_field("", 32));
+        }
+        assert_eq!(bytes.len(), header_bytes);
+        for value in mask_on {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in mask_off {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let event_count = i16::try_from(mask_on.len() * 2).expect("fixture event count");
+        bytes.extend_from_slice(&event_count.to_le_bytes());
+        bytes
+    }
+
+    fn padded_field(value: &str, width: usize) -> Vec<u8> {
+        assert!(value.len() <= width);
+        let mut bytes = vec![b' '; width];
+        bytes[..value.len()].copy_from_slice(value.as_bytes());
+        bytes
     }
 
     fn synthetic_edf(

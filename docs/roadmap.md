@@ -10,11 +10,12 @@ No milestone below is complete yet, and there is no supported desktop release.
 The current repository has:
 
 - the Rust workspace, pinned OSCAR-code provenance, GPL/privacy policies, and CI;
-- bounded ResMed card detection, machine identification, and pre-import DATALOG
-  candidate indexing, plus a direct core-library importer for validated
-  uncompressed BRP waveforms;
-- an independent hardened EDF/EDF+ parser used for bounded candidate-header
-  inspection and the narrow BRP import slice;
+- bounded ResMed card detection and machine identification, schema-v3
+  STR-anchored/fallback candidate indexing, and a direct core-library importer
+  for source-selected STR therapy slices, with explicit bounded-repair
+  provenance, plus validated uncompressed BRP and SAD/SA2;
+- an independent hardened EDF/EDF+ parser used for bounded STR/detail
+  inspection and the current core import slice;
 - selected channel metadata and pure analytics helpers with documented
   fail-closed/checked differences, but no imported data pipeline or
   full-session OSCAR goldens;
@@ -58,19 +59,23 @@ events, waveforms, summaries, timezone handling, and duplicate detection into
 safe Rust slices. Keep parsers independent from UI and storage so pure portions
 can later target WASM.
 
-The first slice is now implemented at the core library boundary: it discovers
-and indexes a source, validates complete uncompressed BRP files, applies full
-affine EDF calibration, normalizes supported flow signals to L/min, and returns
-bounded partial sessions with stable opaque keys and scoped warnings. Its
-caller must provide an explicit fixed-offset device-clock context.
+The current slice is implemented at the core library boundary: it discovers
+and indexes a source, verifies bounded uncompressed STR identity and mask
+boundaries, emits source-selected MaskOn slices or STR-only summary sessions,
+retains bounded-repair provenance in scoped warnings, validates complete
+uncompressed BRP/SAD/SA2 files, applies full affine EDF calibration, normalizes
+supported flow signals to L/min, and returns stable opaque keys. Its caller
+must provide an explicit fixed-offset device-clock context.
 
-The candidate index remains a heuristic and is not seeded from STR
-mask-on/mask-off records. STR intervals/settings, PLD, EVE, CSL, SAD/SA2 payload
-decoding, compressed BRP, durable service execution, native import-job
-capability, and real UI therapy queries remain in this milestone. CSL is
-Cheyne-Stokes respiration (CSR) annotation data, not a central-apnea channel.
-The partial BRP library result is not evidence that this milestone or OSCAR
-session parity is complete.
+The schema-v3 candidate index separates authoritative STR boundaries from the
+wider detail envelope and attempts a comparison-bounded duration-grouping
+fallback on days without usable STR. Budget exhaustion omits fallback
+candidates atomically while retaining independently valid STR candidates. STR
+settings/day-summary metrics, PLD, EVE, CSL, AEV, compressed EDF, durable
+service execution, native import-job capability, and real UI therapy queries
+remain in this milestone. CSL is Cheyne-Stokes respiration (CSR) annotation
+data, not a central-apnea channel. This bounded core result is not evidence
+that the milestone or OSCAR session parity is complete.
 
 Gate: malformed-input unit and fuzz tests pass; differential results match the
 OSCAR baseline; importing the same card twice is idempotent; cancellation or a

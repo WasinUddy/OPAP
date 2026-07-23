@@ -18,12 +18,12 @@ The repository contains tested foundations, not a user-ready CPAP application:
 
 | Area | What works now | Important limit |
 | --- | --- | --- |
-| ResMed source handling | Bounded card inventory, card detection, machine identification, a heuristic DATALOG candidate index, and core-library import of validated uncompressed BRP waveforms as partial sessions | STR intervals/settings, PLD, EVE, CSL, SAD/SA2 payloads, and compressed BRP are not decoded |
-| EDF/EDF+ | A safe, allocation-bounded parser for headers, samples, full affine calibration, and TAL annotations; the BRP slice imports supported calibrated signals and normalizes flow to L/min | Only supported uncompressed BRP signals feed sessions, and deliberate safety/spec corrections mean parser behavior is not universally identical to OSCAR |
-| Local storage | Versioned SQLite migrations and repositories for profiles, machines, sessions, events, waveforms, chunks, and import history | The BRP library report is not connected to a durable service import workflow or user profile |
+| ResMed source handling | Bounded card inventory and identification; serial-verified STR MaskOn slices (with explicit repair provenance) and summary-only sessions; bounded deterministic detail fallback that fails closed on work-budget exhaustion; validated uncompressed BRP waveforms and BRP-anchored SAD/SA2 oximetry | STR settings/day-summary metrics, PLD, EVE, CSL, AEV, compressed EDF, and full OSCAR parity remain unavailable |
+| EDF/EDF+ | A safe, allocation-bounded parser for headers, samples, full affine calibration, and TAL annotations; supported BRP and oximetry signals retain source provenance and flow is normalized to L/min | Only selected uncompressed signals feed sessions, and deliberate safety/spec corrections mean parser behavior is not universally identical to OSCAR |
+| Local storage | Versioned SQLite migrations and repositories for profiles, machines, sessions, events, waveforms, chunks, and import history | The core import report is not connected to a durable service import workflow or user profile |
 | Desktop UI | Responsive Mantine Overview, Daily, Import, and Settings/About screens with an explicit browser-demo adapter and a typed native adapter | Therapy views still contain fabricated sample values; real therapy query APIs are unavailable |
 | Native/application boundaries | A thin Tauri host delegates bootstrap, profile/source inspection, and blocked import-job workflows to the framework-neutral service | Real source inspection is local and path-opaque, but the advertised `session_import` capability remains `false` and no native job executes the core importer |
-| Compatibility tests | Synthetic unit/integration tests, ResMed identification and partial-BRP Cucumber scenarios, and an opt-in private conformance layout | A canonical full-session oracle comparison and golden suite remain planned |
+| Compatibility tests | Synthetic unit/integration tests, ResMed identification plus STR/BRP Cucumber scenarios, and an opt-in private conformance layout | A canonical full-session oracle comparison and golden suite remain planned |
 
 See the [architecture and integration status](docs/architecture.md), the
 [OSCAR port map](PORTING.md), and the [roadmap](docs/roadmap.md) for the exact
@@ -94,15 +94,18 @@ Treat the resulting serial number and source path as sensitive. These commands
 do not invoke the core BRP import API, do not import or persist sessions, and
 never write to the source card.
 
-At the Rust library boundary, `ResmedImporter::import` can discover/index a card
-and decode validated, uncompressed BRP waveforms. The caller must supply an
+At the Rust library boundary, `ResmedImporter::import` can discover/index a
+card, verify and decode uncompressed STR mask boundaries, emit source-selected
+MaskOn slices (including explicit bounded-repair provenance and STR-only
+summary sessions), and attach validated uncompressed BRP plus trustworthy
+BRP-anchored SAD/SA2 detail. The caller must supply an
 explicit fixed UTC-offset clock context; the importer never guesses from the
-host timezone. It applies full affine EDF calibration, normalizes supported
-flow signals to L/min, preserves source timing/calibration provenance, and
-returns deterministic opaque keys, partial-session warnings, and other
-privacy-safe diagnostics. File, aggregate-byte, parser-structure, and
-materialized-sample limits fail closed. This API does not persist its report or
-make native/UI import available.
+host timezone. It preserves source-selected STR usage independently from the
+wider detail envelope, applies full affine EDF calibration, normalizes supported
+flow signals to L/min, and returns deterministic opaque keys and privacy-safe
+diagnostics. File, aggregate-byte, parser-structure, and materialized-sample
+limits fail closed. This API does not persist its report or make native/UI
+import available.
 
 ## Development setup
 
@@ -159,11 +162,13 @@ commit `c5c7890785b196993c7c67966f024c32929ec5ab`.
 Compatibility is intentionally narrower than “OSCAR rewritten.” OPAP corrects
 OSCAR's derived JSON family-name truncation, excludes `RMVENT_*` definitions
 that exist only in OSCAR-SQL, and applies explicit safety guards to EDF and
-analytics behavior. The current session-candidate index is a heuristic without
-OSCAR's STR mask-on/mask-off seeding. Its first import slice decodes only
-validated uncompressed BRP waveforms, returning explicitly partial sessions
-with stable opaque keys and warnings. STR intervals/settings, PLD, EVE, CSL,
-SAD/SA2 payload decoding, compressed BRP, STR settings/summary metrics, durable
+analytics behavior. The schema-v3 candidate index uses serial-verified,
+unambiguous STR mask-on/mask-off anchors, associates detail without transitive
+interval expansion, and retains the prior duration-grouping fallback when STR
+is unusable. Import emits source-selected STR MaskOn slices and usage with
+session-scoped repair warnings, STR-only summary sessions, or partial sessions
+with validated BRP and BRP-anchored SAD/SA2 data. STR
+settings/day-summary metrics, PLD, EVE, CSL, AEV, compressed EDF, durable
 service execution, native import jobs, and real UI therapy queries remain
 unavailable. Analytics also omits OSCAR's CPAP-machine-type filter and uses a
 bounded form of OSCAR's day-style duration-weighted percentile calculation.

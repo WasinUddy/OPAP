@@ -12,21 +12,24 @@
 //! Bounded ResMed detail import: uncompressed BRP waveforms plus SAD/SA2
 //! oximetry.
 //!
-//! This deliberately produces partial sessions. STR mask intervals, settings,
-//! EVE/CSL events, and PLD detail are not decoded by this slice. Oximetry is
-//! attached only to a candidate with trustworthy decoded BRP therapy data.
+//! Serial-verified STR mask intervals produce source-selected therapy slices,
+//! including explicitly identified bounded repairs and summary-only sessions
+//! when no trustworthy BRP waveform is present. Settings, EVE/CSL events, and
+//! PLD detail are not yet attached by this slice. Oximetry remains restricted
+//! to candidates with trustworthy decoded BRP therapy data.
 
-#[cfg(test)]
-use super::ResmedSessionIndex;
+use super::str::StrBoundaryRepair;
 use super::{
     IMPORTER_ID, ResmedDeviceLocalTime, ResmedEdfHeaderSummary, ResmedImporter,
-    ResmedSessionCandidate, ResmedSessionFile, ResmedSessionFileKind,
-    index_session_candidates_from_inventory,
+    ResmedSessionAnchor, ResmedSessionCandidate, ResmedSessionFile, ResmedSessionFileKind,
+    index_session_candidates_from_inventory_for_machine,
 };
+#[cfg(test)]
+use super::{ResmedSessionIndex, index_session_candidates_from_inventory};
 use crate::domain::{
     ChannelKind, ChannelMetadata, DeviceLocalDateTime, EdfSourceEncoding, ImportReport,
     ImportStatistics, ImportWarning, Session, SessionDataKind, SessionSummary, SessionTimestamp,
-    WarningSeverity, WaveformSeries,
+    TherapySlice, TherapySliceState, WarningSeverity, WaveformSeries,
 };
 use crate::importer::{
     ImportClockContext, ImportError, ImportErrorKind, ImportOptions, ImportSource, Importer,
@@ -35,6 +38,7 @@ use crate::importer::{
 use opap_channels::{ResmedFileKind, resmed_signal_prefix};
 use opap_edf::{EdfFile, EdfHeader, Limits, Parser, Signal};
 use sha2::{Digest, Sha256};
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Maximum bytes read from one uncompressed BRP, SAD, or SA2 file.
@@ -83,10 +87,68 @@ const BRP_LIMITS: Limits = Limits {
     max_annotation_text_bytes: RESMED_BRP_MAX_ANNOTATION_TEXT_BYTES,
 };
 
+struct CountingImportSource<'a> {
+    inner: &'a dyn ImportSource,
+    files_read: RefCell<BTreeSet<String>>,
+    bytes_read: Cell<u64>,
+}
+
+impl<'a> CountingImportSource<'a> {
+    fn new(inner: &'a dyn ImportSource) -> Self {
+        Self {
+            inner,
+            files_read: RefCell::new(BTreeSet::new()),
+            bytes_read: Cell::new(0),
+        }
+    }
+
+    fn record_read(&self, relative_path: &str, byte_count: usize) {
+        self.files_read
+            .borrow_mut()
+            .insert(relative_path.to_owned());
+        self.bytes_read.set(
+            self.bytes_read
+                .get()
+                .saturating_add(u64::try_from(byte_count).unwrap_or(u64::MAX)),
+        );
+    }
+
+    fn statistics(&self) -> (u64, u64) {
+        (
+            u64::try_from(self.files_read.borrow().len()).unwrap_or(u64::MAX),
+            self.bytes_read.get(),
+        )
+    }
+}
+
+impl ImportSource for CountingImportSource<'_> {
+    fn inventory(&self) -> Result<crate::SourceInventory, ImportError> {
+        self.inner.inventory()
+    }
+
+    fn read_file(&self, relative_path: &str, max_bytes: usize) -> Result<Vec<u8>, ImportError> {
+        let bytes = self.inner.read_file(relative_path, max_bytes)?;
+        self.record_read(relative_path, bytes.len());
+        Ok(bytes)
+    }
+
+    fn read_file_prefix(
+        &self,
+        relative_path: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ImportError> {
+        let bytes = self.inner.read_file_prefix(relative_path, max_bytes)?;
+        self.record_read(relative_path, bytes.len());
+        Ok(bytes)
+    }
+}
+
 pub(super) fn import_resmed_sessions(
     source: &dyn ImportSource,
     options: &ImportOptions,
 ) -> Result<ImportReport, ImportError> {
+    let counted_source = CountingImportSource::new(source);
+    let source: &dyn ImportSource = &counted_source;
     let discovery = Importer::discover(&ResmedImporter, source)?.ok_or_else(|| {
         ImportError::new(
             ImportErrorKind::UnsupportedSource,
@@ -110,9 +172,10 @@ pub(super) fn import_resmed_sessions(
     validate_clock_context(clock)?;
 
     let current_device_local_time = resmed_local_from_device(clock.current_device_local_time)?;
-    let index = index_session_candidates_from_inventory(
+    let index = index_session_candidates_from_inventory_for_machine(
         source,
         &discovery.inventory,
+        &machine_serial,
         &current_device_local_time,
     )?;
 
@@ -162,17 +225,19 @@ pub(super) fn import_resmed_sessions(
         let mut session = decoded
             .session
             .take()
-            .expect("anchored candidate contains a BRP-backed session");
-        attach_candidate_oximetry(
-            source,
-            candidate,
-            &machine_serial,
-            clock,
-            &mut session,
-            &mut decoded.warnings,
-            &mut statistics,
-            &mut import_budget,
-        )?;
+            .expect("anchored candidate contains an imported session");
+        if decoded.brp_anchored {
+            attach_candidate_oximetry(
+                source,
+                candidate,
+                &machine_serial,
+                clock,
+                &mut session,
+                &mut decoded.warnings,
+                &mut statistics,
+                &mut import_budget,
+            )?;
+        }
         warnings.extend(decoded.warnings);
 
         if options
@@ -187,15 +252,47 @@ pub(super) fn import_resmed_sessions(
             session.channels.clear();
             session.waveforms.clear();
         }
-        warnings.push(warning(
-            "resmed_partial_brp_session",
-            "Imported bounded BRP waveforms and any trustworthy SAD/SA2 oximetry; STR intervals, settings, EVE/CSL events, and PLD detail are unavailable",
-            None,
-            Some(&session.id),
-        ));
+        if let ResmedSessionAnchor::StrMask {
+            repair: Some(repair),
+            ..
+        } = &candidate.anchor
+        {
+            let (code, message) = match repair {
+                StrBoundaryRepair::SlotZeroContinuation => (
+                    "resmed_str_slot_zero_continuation_repair",
+                    "STR session start was selected as local noon because the slot-zero continuing mask-on was encoded as zero",
+                ),
+                StrBoundaryRepair::HistoricalTrailingNoon => (
+                    "resmed_str_historical_trailing_noon_repair",
+                    "STR session end was bounded at the following local noon because the historical source mask-off value was absent",
+                ),
+            };
+            warnings.push(warning(code, message, None, Some(&session.id)));
+        }
+        match (&candidate.anchor, decoded.brp_anchored) {
+            (ResmedSessionAnchor::StrMask { .. }, true) => warnings.push(warning(
+                "resmed_partial_str_session",
+                "Imported the selected STR therapy interval with bounded BRP waveforms and any trustworthy SAD/SA2 oximetry; settings, day summaries, EVE/CSL events, and PLD detail are unavailable",
+                None,
+                Some(&session.id),
+            )),
+            (ResmedSessionAnchor::StrMask { .. }, false) => warnings.push(warning(
+                "resmed_str_boundary_only_session",
+                "Imported the selected STR therapy interval without trustworthy BRP waveform data; settings, day summaries, EVE/CSL events, and PLD detail are unavailable",
+                None,
+                Some(&session.id),
+            )),
+            (ResmedSessionAnchor::DetailFallback, _) => warnings.push(warning(
+                "resmed_partial_brp_session",
+                "Imported bounded BRP waveforms and any trustworthy SAD/SA2 oximetry; STR intervals, settings, EVE/CSL events, and PLD detail are unavailable",
+                None,
+                Some(&session.id),
+            )),
+        }
         statistics.sessions_imported = statistics.sessions_imported.saturating_add(1);
         sessions.push(session);
     }
+    (statistics.files_read, statistics.bytes_read) = counted_source.statistics();
 
     Ok(ImportReport {
         schema_version: crate::domain::IMPORT_SCHEMA_VERSION,
@@ -210,6 +307,7 @@ pub(super) fn import_resmed_sessions(
 struct CandidateDecode {
     session: Option<Session>,
     warnings: Vec<ImportWarning>,
+    brp_anchored: bool,
 }
 
 struct DecodedDetailFile {
@@ -426,6 +524,7 @@ fn decode_brp_candidate(
 ) -> Result<CandidateDecode, ImportError> {
     let mut warnings = Vec::new();
     let mut brp_files = Vec::new();
+    let str_anchor = str_anchor(candidate)?;
 
     for file in candidate
         .files
@@ -460,7 +559,7 @@ fn decode_brp_candidate(
         }
     }
 
-    if brp_files.is_empty() {
+    if brp_files.is_empty() && str_anchor.is_none() {
         warnings.push(warning(
             "resmed_candidate_not_imported",
             "Candidate has no trustworthy decoded BRP waveform data",
@@ -470,6 +569,7 @@ fn decode_brp_candidate(
         return Ok(CandidateDecode {
             session: None,
             warnings,
+            brp_anchored: false,
         });
     }
 
@@ -482,7 +582,20 @@ fn decode_brp_candidate(
         brp_intervals.push((file.local_start_ms, file.local_end_ms));
     }
 
-    if brp_end_ms <= brp_start_ms {
+    if !brp_files.is_empty() && brp_end_ms <= brp_start_ms {
+        warnings.push(warning(
+            "resmed_brp_not_decoded",
+            "Candidate BRP detail had no positive calibrated time envelope and was ignored",
+            None,
+            None,
+        ));
+        brp_files.clear();
+        brp_intervals.clear();
+        brp_start_ms = i64::MAX;
+        brp_end_ms = i64::MIN;
+    }
+
+    if brp_files.is_empty() && str_anchor.is_none() {
         warnings.push(warning(
             "resmed_candidate_not_imported",
             "Candidate had no supported, calibrated BRP signals and was not emitted as a session",
@@ -492,11 +605,74 @@ fn decode_brp_candidate(
         return Ok(CandidateDecode {
             session: None,
             warnings,
+            brp_anchored: false,
         });
     }
 
-    let usage_ms = covered_duration_millis(&mut brp_intervals)?;
-    let source_key = logical_brp_session_source_key(candidate, &brp_files, brp_start_ms);
+    let brp_anchored = !brp_files.is_empty();
+    let (source_key, usage_ms, envelope_start_ms, envelope_end_ms, therapy_day, slices) =
+        if let Some(anchor) = &str_anchor {
+            let raw_mask_on_minute = u16::try_from(anchor.raw_mask_on_value).map_err(|_| {
+                ImportError::new(
+                    ImportErrorKind::InvalidData,
+                    "STR source mask-on value is not a nonnegative raw u16 minute",
+                )
+            })?;
+            let mask_on_bytes = raw_mask_on_minute.to_be_bytes();
+            let source_key = opaque_key(
+                "opap/resmed/str-mask-session-source/v1",
+                [anchor.therapy_day.as_bytes(), mask_on_bytes.as_slice()],
+            );
+            let usage_ms = anchor
+                .end_ms
+                .checked_sub(anchor.start_ms)
+                .and_then(|duration| u64::try_from(duration).ok())
+                .ok_or_else(|| {
+                    ImportError::new(
+                        ImportErrorKind::InvalidData,
+                        "STR mask interval has no positive bounded duration",
+                    )
+                })?;
+            let envelope_start_ms = if brp_anchored {
+                anchor.start_ms.min(brp_start_ms)
+            } else {
+                anchor.start_ms
+            };
+            let envelope_end_ms = if brp_anchored {
+                anchor.end_ms.max(brp_end_ms)
+            } else {
+                anchor.end_ms
+            };
+            let slice_start = session_timestamp(anchor.start_ms, clock)?;
+            let slice_end = session_timestamp(anchor.end_ms, clock)?;
+            let slice_source_key = opaque_key(
+                "opap/resmed/str-mask-slice-source/v1",
+                std::iter::once(source_key.as_bytes()),
+            );
+            (
+                source_key,
+                usage_ms,
+                envelope_start_ms,
+                envelope_end_ms,
+                anchor.therapy_day.clone(),
+                vec![TherapySlice {
+                    source_key: slice_source_key,
+                    state: TherapySliceState::MaskOn,
+                    start_time_unix_ms: slice_start.normalized_utc_unix_ms,
+                    end_time_unix_ms: slice_end.normalized_utc_unix_ms,
+                }],
+            )
+        } else {
+            let usage_ms = covered_duration_millis(&mut brp_intervals)?;
+            (
+                logical_brp_session_source_key(candidate, &brp_files, brp_start_ms),
+                usage_ms,
+                brp_start_ms,
+                brp_end_ms,
+                candidate.resmed_day.clone(),
+                Vec::new(),
+            )
+        };
     let id = opaque_key(
         "opap/resmed/session-id/v2",
         std::iter::once(source_key.as_bytes()),
@@ -511,8 +687,8 @@ fn decode_brp_candidate(
         waveforms.extend(file.waveforms);
     }
 
-    let start_time = session_timestamp(brp_start_ms, clock)?;
-    let end_time = session_timestamp(brp_end_ms, clock)?;
+    let start_time = session_timestamp(envelope_start_ms, clock)?;
+    let end_time = session_timestamp(envelope_end_ms, clock)?;
     let session_duration_ms = end_time
         .normalized_utc_unix_ms
         .checked_sub(start_time.normalized_utc_unix_ms)
@@ -538,11 +714,15 @@ fn decode_brp_candidate(
         session: Some(Session {
             id,
             source_key,
-            therapy_day: candidate.resmed_day.clone(),
-            data_kind: SessionDataKind::Partial,
+            therapy_day,
+            data_kind: if brp_anchored {
+                SessionDataKind::Partial
+            } else {
+                SessionDataKind::SummaryOnly
+            },
             start_time,
             end_time,
-            slices: Vec::new(),
+            slices,
             channels: channels.into_values().collect(),
             waveforms,
             event_series: Vec::new(),
@@ -553,7 +733,83 @@ fn decode_brp_candidate(
             },
         }),
         warnings,
+        brp_anchored,
     })
+}
+
+struct StrMaskAnchor {
+    therapy_day: String,
+    raw_mask_on_value: i16,
+    start_ms: i64,
+    end_ms: i64,
+}
+
+fn str_anchor(candidate: &ResmedSessionCandidate) -> Result<Option<StrMaskAnchor>, ImportError> {
+    let ResmedSessionAnchor::StrMask {
+        therapy_day,
+        mask_on_minute,
+        mask_off_minute,
+        source_mask_on_value,
+        source_mask_off_value,
+        start_time,
+        end_time,
+        repair,
+    } = &candidate.anchor
+    else {
+        return Ok(None);
+    };
+    let raw_mask_on_value =
+        source_mask_on_value.unwrap_or_else(|| i16::try_from(*mask_on_minute).unwrap_or(i16::MIN));
+    let raw_mask_off_value = source_mask_off_value.unwrap_or_else(|| {
+        if *repair == Some(StrBoundaryRepair::HistoricalTrailingNoon) {
+            0
+        } else {
+            i16::try_from(*mask_off_minute).unwrap_or(i16::MIN)
+        }
+    });
+    if therapy_day != &candidate.resmed_day
+        || mask_off_minute <= mask_on_minute
+        || i16::try_from(*mask_on_minute).ok() != Some(raw_mask_on_value)
+    {
+        return Err(ImportError::new(
+            ImportErrorKind::InvalidData,
+            "STR candidate anchor is inconsistent with its therapy day or selected mask interval",
+        ));
+    }
+    let valid_source_end = match repair {
+        None => i16::try_from(*mask_off_minute).ok() == Some(raw_mask_off_value),
+        Some(StrBoundaryRepair::SlotZeroContinuation) => {
+            raw_mask_on_value == 0
+                && *mask_on_minute == 0
+                && i16::try_from(*mask_off_minute).ok() == Some(raw_mask_off_value)
+        }
+        Some(StrBoundaryRepair::HistoricalTrailingNoon) => {
+            raw_mask_on_value > 0 && raw_mask_off_value <= 0 && *mask_off_minute == 1_440
+        }
+    };
+    if !valid_source_end {
+        return Err(ImportError::new(
+            ImportErrorKind::InvalidData,
+            "STR candidate selected boundary is inconsistent with its source values and repair",
+        ));
+    }
+    let start_ms =
+        local_unix_millis(&device_local_from_resmed(start_time)?).map_err(invalid_source_clock)?;
+    let end_ms =
+        local_unix_millis(&device_local_from_resmed(end_time)?).map_err(invalid_source_clock)?;
+    let expected_duration_ms = i64::from(mask_off_minute - mask_on_minute).saturating_mul(60_000);
+    if end_ms.checked_sub(start_ms) != Some(expected_duration_ms) {
+        return Err(ImportError::new(
+            ImportErrorKind::InvalidData,
+            "STR candidate selected times do not match its selected minute offsets",
+        ));
+    }
+    Ok(Some(StrMaskAnchor {
+        therapy_day: therapy_day.clone(),
+        raw_mask_on_value,
+        start_ms,
+        end_ms,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1408,12 +1664,12 @@ fn covered_duration_millis(intervals: &mut [(i64, i64)]) -> Result<u64, ImportEr
         })
 }
 
-/// Provisional logical identity for BRP-backed partial sessions.
+/// Logical identity for BRP-backed detail-fallback sessions.
 ///
 /// Payload fingerprints deliberately stay out of this key so authoritative
 /// replacement can update changed children without duplicating the logical
-/// session. The STR mask-on identity should supersede this anchor before the
-/// native import executor is enabled.
+/// session. Serial-verified STR candidates use their separate therapy-day plus
+/// raw mask-on identity domain instead.
 fn logical_brp_session_source_key(
     candidate: &ResmedSessionCandidate,
     brp_files: &[(&ResmedSessionFile, DecodedDetailFile)],
@@ -1489,6 +1745,17 @@ fn candidate_ends_at_or_before(
 ) -> bool {
     let mut saw_brp = false;
     let mut latest_upper_bound = i64::MIN;
+    let mut has_authoritative_str_anchor = false;
+    if let ResmedSessionAnchor::StrMask { end_time, .. } = &candidate.anchor {
+        let Ok(device_local) = device_local_from_resmed(end_time) else {
+            return false;
+        };
+        let Ok(local_end_ms) = local_unix_millis(&device_local) else {
+            return false;
+        };
+        latest_upper_bound = local_end_ms;
+        has_authoritative_str_anchor = true;
+    }
     for file in candidate
         .files
         .iter()
@@ -1527,7 +1794,7 @@ fn candidate_ends_at_or_before(
     // rejected by `validate_header_summary` if decoded. This ceiling is
     // therefore a conservative upper bound for every otherwise-accepted
     // decoded detail payload.
-    saw_brp
+    (saw_brp || has_authoritative_str_anchor)
         && latest_upper_bound != i64::MIN
         && normalize_millis(latest_upper_bound, clock).is_ok_and(|end| end <= cutoff)
 }
@@ -1842,6 +2109,17 @@ mod tests {
                 .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
         }
 
+        fn insert_directory(&mut self, path: &str) {
+            self.inventory.entries.push(SourceEntry {
+                relative_path: path.to_owned(),
+                kind: SourceEntryKind::Directory,
+                size_bytes: 0,
+            });
+            self.inventory
+                .entries
+                .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        }
+
         fn full_read_count(&self, path: &str) -> usize {
             self.full_reads.borrow().get(path).copied().unwrap_or(0)
         }
@@ -2055,6 +2333,23 @@ mod tests {
         bytes
     }
 
+    fn synthetic_str(serial: &str, mask_on: &[i16], mask_off: &[i16]) -> Vec<u8> {
+        assert_eq!(mask_on.len(), mask_off.len());
+        assert!(!mask_on.is_empty());
+        let event_count = i16::try_from(mask_on.len() * 2).expect("fixture event count");
+        synthetic_detail_with_start(
+            &[
+                SignalFixture::new("Mask On", mask_on.len(), mask_on),
+                SignalFixture::new("Mask Off", mask_off.len(), mask_off),
+                SignalFixture::new("Mask Events", 1, &[event_count]),
+            ],
+            1,
+            "86400",
+            &format!("ResMed SRN={serial}"),
+            "02.01.2612.00.00",
+        )
+    }
+
     fn card_with_brp(bytes: Vec<u8>) -> MemorySource {
         let mut source = MemorySource::default();
         source.insert("STR.edf", b"signature only".to_vec());
@@ -2063,6 +2358,33 @@ mod tests {
             b"#SRN serial-123\n#PNA AirSense_10_AutoSet\n#PCD 37028\n".to_vec(),
         );
         source.insert("DATALOG/20260102_220000_BRP.edf", bytes);
+        source
+    }
+
+    fn card_with_valid_str(
+        mask_on: &[i16],
+        mask_off: &[i16],
+        files: impl IntoIterator<Item = (&'static str, Vec<u8>)>,
+    ) -> MemorySource {
+        card_with_str_serial("serial-123", mask_on, mask_off, files)
+    }
+
+    fn card_with_str_serial(
+        str_serial: &str,
+        mask_on: &[i16],
+        mask_off: &[i16],
+        files: impl IntoIterator<Item = (&'static str, Vec<u8>)>,
+    ) -> MemorySource {
+        let mut source = MemorySource::default();
+        source.insert("STR.edf", synthetic_str(str_serial, mask_on, mask_off));
+        source.insert(
+            "Identification.tgt",
+            b"#SRN serial-123\n#PNA AirSense_10_AutoSet\n#PCD 37028\n".to_vec(),
+        );
+        source.insert_directory("DATALOG");
+        for (path, bytes) in files {
+            source.insert(path, bytes);
+        }
         source
     }
 
@@ -2128,6 +2450,7 @@ mod tests {
                 start_time,
                 estimated_end_time: None,
                 resmed_day: "2026-01-02".to_owned(),
+                anchor: ResmedSessionAnchor::DetailFallback,
                 files,
             }],
             warnings: Vec::new(),
@@ -2164,6 +2487,231 @@ mod tests {
             2,
             "1",
         )
+    }
+
+    #[test]
+    fn imports_str_only_as_exact_summary_session_and_honors_exclusive_cutoff() {
+        let source = card_with_valid_str(&[600], &[660], []);
+        let report = import_resmed_sessions(&source, &options()).expect("import STR-only card");
+        assert_eq!(report.sessions.len(), 1);
+        let session = &report.sessions[0];
+        assert_eq!(session.data_kind, SessionDataKind::SummaryOnly);
+        assert_eq!(session.therapy_day, "2026-01-02");
+        assert!(session.channels.is_empty());
+        assert!(session.waveforms.is_empty());
+        assert_eq!(session.summary.usage_ms, 60 * 60 * 1_000);
+        assert_eq!(session.slices.len(), 1);
+        assert_eq!(session.slices[0].state, TherapySliceState::MaskOn);
+        assert_eq!(
+            session.slices[0].start_time_unix_ms,
+            session.start_time.normalized_utc_unix_ms
+        );
+        assert_eq!(
+            session.slices[0].end_time_unix_ms,
+            session.end_time.normalized_utc_unix_ms
+        );
+        assert_eq!(
+            session.start_time.device_local_wall_time,
+            "2026-01-02T22:00:00.000"
+        );
+        assert_eq!(
+            session.end_time.device_local_wall_time,
+            "2026-01-02T23:00:00.000"
+        );
+        let mask_on_bytes = 600u16.to_be_bytes();
+        let expected_source_key = opaque_key(
+            "opap/resmed/str-mask-session-source/v1",
+            [b"2026-01-02".as_slice(), mask_on_bytes.as_slice()],
+        );
+        assert_eq!(session.source_key, expected_source_key);
+        assert_eq!(
+            session.id,
+            opaque_key(
+                "opap/resmed/session-id/v2",
+                std::iter::once(expected_source_key.as_bytes())
+            )
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "resmed_str_boundary_only_session")
+        );
+        assert_eq!(
+            report.statistics.files_read, 2,
+            "identification and root STR are the two files read"
+        );
+        let expected_bytes =
+            source.files["Identification.tgt"].len() + source.files["STR.edf"].len();
+        assert_eq!(
+            report.statistics.bytes_read,
+            u64::try_from(expected_bytes).expect("fixture byte count")
+        );
+
+        let mut at_end = options();
+        at_end.sessions_not_before_unix_ms = Some(session.end_time.normalized_utc_unix_ms);
+        let skipped =
+            import_resmed_sessions(&source, &at_end).expect("cutoff equal to exclusive STR end");
+        assert!(skipped.sessions.is_empty());
+        assert_eq!(skipped.statistics.sessions_skipped, 1);
+
+        let mut before_end = options();
+        before_end.sessions_not_before_unix_ms = Some(session.end_time.normalized_utc_unix_ms - 1);
+        let retained =
+            import_resmed_sessions(&source, &before_end).expect("cutoff before exclusive STR end");
+        assert_eq!(retained.sessions.len(), 1);
+    }
+
+    #[test]
+    fn repaired_str_session_keeps_source_provenance_and_scoped_warning() {
+        let source = card_with_valid_str(&[600], &[0], []);
+        let report = import_resmed_sessions(&source, &options()).expect("import repaired STR");
+        assert_eq!(report.sessions.len(), 1);
+        let session = &report.sessions[0];
+        assert_eq!(session.data_kind, SessionDataKind::SummaryOnly);
+        assert_eq!(session.summary.usage_ms, 14 * 60 * 60 * 1_000);
+        assert_eq!(
+            session.start_time.device_local_wall_time,
+            "2026-01-02T22:00:00.000"
+        );
+        assert_eq!(
+            session.end_time.device_local_wall_time,
+            "2026-01-03T12:00:00.000"
+        );
+        let repair_warning = report
+            .warnings
+            .iter()
+            .find(|warning| warning.code == "resmed_str_historical_trailing_noon_repair")
+            .expect("session-scoped repair provenance");
+        assert_eq!(
+            repair_warning.session_id.as_deref(),
+            Some(session.id.as_str())
+        );
+        assert!(repair_warning.message.contains("bounded"));
+    }
+
+    #[test]
+    fn str_plus_brp_uses_exact_mask_usage_and_mask_off_mutation_keeps_identity() {
+        let path = "DATALOG/20260102_220000_BRP.edf";
+        let first_source = card_with_valid_str(&[600], &[660], [(path, simple_flow())]);
+        let first = import_resmed_sessions(&first_source, &options()).expect("import STR plus BRP");
+        assert_eq!(first.sessions.len(), 1);
+        let first_session = &first.sessions[0];
+        assert_eq!(first_session.data_kind, SessionDataKind::Partial);
+        assert!(!first_session.waveforms.is_empty());
+        assert_eq!(first_session.summary.usage_ms, 60 * 60 * 1_000);
+        assert_eq!(first_session.slices.len(), 1);
+        assert_eq!(
+            first_session.slices[0].start_time_unix_ms,
+            first_session.start_time.normalized_utc_unix_ms
+        );
+        assert_eq!(
+            first_session.slices[0].end_time_unix_ms,
+            first_session.end_time.normalized_utc_unix_ms
+        );
+        assert!(
+            first
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "resmed_partial_str_session")
+        );
+
+        let changed_source = card_with_valid_str(&[600], &[720], [(path, simple_flow())]);
+        let changed =
+            import_resmed_sessions(&changed_source, &options()).expect("reimport changed mask-off");
+        assert_eq!(changed.sessions.len(), 1);
+        let changed_session = &changed.sessions[0];
+        assert_eq!(changed_session.id, first_session.id);
+        assert_eq!(changed_session.source_key, first_session.source_key);
+        assert_eq!(
+            changed_session.slices[0].source_key,
+            first_session.slices[0].source_key
+        );
+        assert_eq!(changed_session.summary.usage_ms, 2 * 60 * 60 * 1_000);
+        assert_eq!(
+            changed_session.slices[0].start_time_unix_ms,
+            first_session.slices[0].start_time_unix_ms
+        );
+        assert!(
+            changed_session.slices[0].end_time_unix_ms > first_session.slices[0].end_time_unix_ms
+        );
+    }
+
+    #[test]
+    fn multiple_str_intervals_own_detail_files_without_cross_session_expansion() {
+        let first = simple_flow();
+        let second = synthetic_detail_with_start(
+            &[SignalFixture::new("Flow", 2, &[-50, 50]).calibration(-1, 1, -50, 50)],
+            1,
+            "2",
+            "ResMed SRN=serial-123",
+            "03.01.2600.00.00",
+        );
+        let source = card_with_valid_str(
+            &[600, 720],
+            &[660, 780],
+            [
+                ("DATALOG/20260102_220000_BRP.edf", first),
+                ("DATALOG/20260103_000000_BRP.edf", second),
+            ],
+        );
+        let report = import_resmed_sessions(&source, &options()).expect("import two STR sessions");
+        assert_eq!(report.sessions.len(), 2);
+        assert!(
+            report
+                .sessions
+                .iter()
+                .all(|session| session.waveforms.len() == 1)
+        );
+        assert_eq!(
+            report
+                .sessions
+                .iter()
+                .map(|session| session.summary.usage_ms)
+                .collect::<Vec<_>>(),
+            [60 * 60 * 1_000, 60 * 60 * 1_000]
+        );
+        assert_ne!(report.sessions[0].id, report.sessions[1].id);
+        assert_eq!(
+            report.sessions[0].end_time.device_local_wall_time,
+            "2026-01-02T23:00:00.000"
+        );
+        assert_eq!(
+            report.sessions[1].start_time.device_local_wall_time,
+            "2026-01-03T00:00:00.000"
+        );
+    }
+
+    #[test]
+    fn str_serial_mismatch_preserves_exact_brp_fallback_session_identity() {
+        let fallback = import_resmed_sessions(&card_with_brp(simple_flow()), &options())
+            .expect("invalid STR detail fallback");
+        let mismatch_source = card_with_str_serial(
+            "different-card",
+            &[600],
+            &[660],
+            [("DATALOG/20260102_220000_BRP.edf", simple_flow())],
+        );
+        let mismatch =
+            import_resmed_sessions(&mismatch_source, &options()).expect("mismatched STR fallback");
+        assert_eq!(fallback.sessions.len(), 1);
+        assert_eq!(mismatch.sessions.len(), 1);
+        assert_eq!(mismatch.sessions[0].id, fallback.sessions[0].id);
+        assert_eq!(
+            mismatch.sessions[0].source_key,
+            fallback.sessions[0].source_key
+        );
+        assert_eq!(
+            mismatch.sessions[0].summary.usage_ms,
+            fallback.sessions[0].summary.usage_ms
+        );
+        assert_eq!(mismatch.sessions[0].slices, fallback.sessions[0].slices);
+        assert!(
+            mismatch
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "resmed_str_serial_mismatch")
+        );
     }
 
     #[test]

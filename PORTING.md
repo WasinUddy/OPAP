@@ -23,30 +23,47 @@ remains OPAP's canonical oracle identifier.
 | OPAP module | OSCAR reference | Status |
 | --- | --- | --- |
 | `opap_core::resmed` identity | `resmed_loader.cpp`: `Detect`, `PeekInfo`, `parseIdentFile`, `parseIdentLine`, `scanProductObject` | Bounded presence detection and identity parsing implemented; the JSON-derived family correction is documented below |
-| `opap-edf` | `edfparser.h`, `edfparser.cpp`, `resmed_EDFinfo.*` | Generic EDF/EDF+ parsing implemented with deliberate safety and EDF-spec differences; used for bounded candidate-header inspection and validated uncompressed BRP decoding |
-| ResMed candidate index | `resmed_loader.cpp`: `ScanFiles`, `lookupEDFType`, `getEDFDuration`, `ResDayTask::run` | Bounded pre-import heuristic implemented; it is not seeded from `STR.edf` and is not session parity |
+| `opap-edf` | `edfparser.h`, `edfparser.cpp`, `resmed_EDFinfo.*` | Generic EDF/EDF+ parsing implemented with deliberate safety and EDF-spec differences; used for bounded STR/detail inspection and validated uncompressed BRP/SAD/SA2 decoding |
+| ResMed candidate index | `resmed_loader.cpp`: `ScanFiles`, `lookupEDFType`, `getEDFDuration`, `ResDayTask::run` | Schema-v3 manifest uses serial-verified, unambiguous STR mask intervals as typed anchors, with deterministic non-transitive detail ownership and the prior duration-grouping fallback |
 | `opap-channels` | `schema.cpp`, `common.cpp`, and ResMed loader aliases | Selected OSCAR-code metadata represented behind typed lookups; `RMVENT_*` entries found only in OSCAR-SQL are excluded from this baseline |
 | `opap-analytics` | `session.*`, `day.*`, `common.*`, `machine.*` | Guarded pure helpers implemented but not wired to partial importer output; important differences are documented below |
-| ResMed session importer | `resmed_loader.cpp`: `Open`, `ScanFiles`, STR mask records, `LoadBRP`, `LoadPLD`, `LoadSAD`, `LoadEVE`, `LoadCSL` | First bounded library slice implemented for validated uncompressed BRP waveforms only; it emits partial sessions rather than OSCAR-equivalent sessions |
+| ResMed session importer | `resmed_loader.cpp`: `Open`, `ScanFiles`, STR mask records, `LoadBRP`, `LoadPLD`, `LoadSAD`, `LoadEVE`, `LoadCSL` | Serial-verified STR boundaries emit source-selected MaskOn slices and STR-only summary sessions, with explicit provenance for bounded historical repairs; validated BRP and SAD/SA2 can add partial detail without changing selected STR usage |
 | Session compatibility manifest | `tests/resmedtests.cpp`, `tests/sessiontests.cpp` | Planned; current tests are synthetic or source-derived, and no full-session OSCAR goldens or full-parity suite exists |
 
 The parser, importer, storage, service, native host, and UI do not yet form a
 clinical-session import pipeline. The CLI can inspect identity. A direct core
-library caller can now use `ResmedImporter::import` for the narrow BRP slice,
+library caller can now use `ResmedImporter::import` for the bounded STR plus
+BRP/SAD/SA2 slice,
 but the result is not durably executed by the service, persisted into a user
 profile, or queried by the native/UI layers. The service's advertised
 `session_import` capability therefore remains `false`. See
 [`docs/architecture.md`](docs/architecture.md) for the wiring status.
 
-## Current bounded BRP slice
+## Current bounded STR and detail slice
 
-The core importer discovers and indexes the source before decoding supported
-uncompressed `_BRP.edf` files. It validates each complete EDF header against
-the bounded index, applies full affine digital-to-physical calibration, and
-normalizes supported flow signals to L/min. Device-local timestamps require a
-caller-supplied fixed-offset clock context, including explicit clock-correction
-provenance; the host timezone is never an implicit input. Emitted session,
-source, and waveform keys are deterministic and opaque.
+The core importer discovers and indexes the source, reads root `STR.edf` within
+a 32 MiB bound, and verifies its sole serial token against the selected card.
+Valid, non-overlapping mask-on/mask-off records seed source-selected half-open
+therapy intervals. A bounded repair is retained explicitly when OSCAR's
+slot-zero continuation or historical trailing-noon convention is needed.
+Filename ownership is tried first, then direct duration overlap;
+detail never expands an STR interval transitively. Days without a usable STR
+anchor attempt the prior detail-duration fallback, including its identifiers.
+That compatibility pass has a global comparison budget and omits all fallback
+candidates atomically if the budget is exhausted; independently valid STR
+candidates remain available.
+
+Each STR anchor emits a source-selected `MaskOn` slice and usage duration,
+including a summary-only session when no trustworthy BRP waveform exists.
+Repair provenance is emitted as a session-scoped warning. Session identity uses
+therapy day plus the raw mask-on value and remains stable when mask-off changes.
+A trustworthy wider BRP/SAD/SA2 detail envelope is kept separate from the
+authoritative therapy slice. Complete detail headers are revalidated, full
+affine calibration is applied, and supported flow is normalized to L/min.
+Device-local timestamps require a caller-supplied fixed-offset clock context,
+including explicit correction provenance; the host timezone is never an
+implicit input. Emitted session, source, slice, and waveform keys are
+deterministic and opaque.
 
 The result is deliberately marked partial. Unsupported or malformed details
 produce scoped, privacy-safe warnings or skip an untrustworthy candidate.
@@ -54,9 +71,9 @@ Per-file and aggregate bytes, file counts, parser structures, and materialized
 samples are all bounded. This is a Rust library capability, not evidence of a
 complete OSCAR session or an enabled application import path.
 
-STR mask intervals and settings, PLD detail, EVE events, CSL annotations,
-SAD/SA2 oximetry payloads, compressed BRP, STR summary metrics, durable service
-execution, native import jobs, and real UI therapy queries remain unavailable.
+STR settings/day-summary metrics, PLD detail, EVE events, CSL annotations, AEV,
+compressed EDF, durable service execution, native import jobs, and real UI
+therapy queries remain unavailable.
 
 ## Porting rules
 
@@ -88,15 +105,16 @@ execution, native import jobs, and real UI therapy queries remain unavailable.
   preserving serial, product code, and product name verbatim. This correction
   is not byte-for-byte parity.
 - OPAP's `DATALOG/` plus `STR.edf` presence check does not mean a source is
-  OSCAR-import-ready. OPAP does not parse STR mask records or derive their
-  intervals, machine type, or settings. The core BRP slice is narrower than
-  OSCAR's import workflow and is not exposed as a native import job.
-- Candidate grouping currently models only a bounded EDF-duration overlap
-  fallback. It does not use OSCAR's primary STR mask-on/mask-off session seeds;
-  compressed EDF (`.edf.gz`), AEV, and unknown DATALOG suffixes may participate
-  in grouping, but only validated uncompressed BRP payloads are decoded. CSL
-  represents Cheyne-Stokes respiration (CSR) annotations, not central-apnea
-  events.
+  OSCAR-import-ready. OPAP parses only uncompressed, serial-matched STR mask
+  records here; STR machine type, settings, and day-summary metrics are not
+  attached. The core slice is narrower than OSCAR's import workflow and is not
+  exposed as a native import job.
+- Candidate grouping uses safe STR seeds only when a whole therapy day is
+  unambiguous. Malformed, duplicate, or serial-mismatched STR data falls back
+  without changing established detail identifiers. Compressed EDF (`.edf.gz`),
+  AEV, and unknown DATALOG suffixes may participate in grouping, but only
+  validated uncompressed BRP and SAD/SA2 payloads are decoded. CSL represents
+  Cheyne-Stokes respiration (CSR) annotations, not central-apnea events.
 - OSCAR-SQL is a separate fork and is not the pinned oracle. In particular,
   SQL-only `RMVENT_*` channel definitions are outside OPAP's OSCAR-code
   compatibility set.

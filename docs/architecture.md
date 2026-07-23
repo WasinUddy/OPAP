@@ -10,10 +10,10 @@ OSCAR parity or a promise that the desktop preview can import therapy data.
 | `apps/desktop` | React, TypeScript, Mantine navigation and data visualization | Selects an explicitly fabricated adapter in a browser and a typed command adapter in Tauri; real therapy query APIs are unavailable |
 | `apps/desktop/src-tauri` | Thin Tauri 2 native host, native folder picker, local database setup, and allowlisted commands | Delegates to `opap-service` and keeps source paths native; no session-import executor is exposed |
 | `crates/opap-service` | Framework-neutral DTOs and application workflows for profiles, opaque source selection, and import-job state | Used by the native host and tested in the root workspace; jobs remain blocked because durable import execution is not implemented and `session_import` remains `false` |
-| `crates/opap-core` | Portable domain contracts, bounded import-source abstraction, ResMed detection, identity parsing, candidate indexing, and partial session import | A direct library caller can import validated uncompressed BRP waveforms with explicit clock context; other ResMed payloads are not decoded |
-| `crates/opap-edf` | Filesystem-independent EDF/EDF+ parsing and validation | Tested independently, including WASM compilation; `opap-core` uses it for bounded candidate headers and complete uncompressed BRP signal decoding |
-| `crates/opap-storage` | SQLite migrations, constraints, repositories, and atomic session-data replacement | Tested as a library; no durable service workflow currently writes core BRP import reports to a user profile |
-| `tests/acceptance` | Executable Gherkin scenarios | Covers synthetic ResMed detection, machine identification, partial BRP import, and privacy-safe service job workflows |
+| `crates/opap-core` | Portable domain contracts, bounded import-source abstraction, ResMed detection, identity parsing, candidate indexing, and partial session import | A direct library caller can import serial-verified STR MaskOn slices/summary sessions plus validated uncompressed BRP and SAD/SA2 detail with explicit clock context |
+| `crates/opap-edf` | Filesystem-independent EDF/EDF+ parsing and validation | Tested independently, including WASM compilation; `opap-core` uses it for bounded STR/detail headers and complete uncompressed BRP/SAD/SA2 decoding |
+| `crates/opap-storage` | SQLite migrations, constraints, repositories, and atomic session-data replacement | Tested as a library; no durable service workflow currently writes core import reports to a user profile |
+| `tests/acceptance` | Executable Gherkin scenarios | Covers synthetic ResMed detection, machine identification, STR-only/STR-plus-BRP/fallback import, and privacy-safe service job workflows |
 | `compat` | Pinned OSCAR-code differential manifest, comparator, and private oracle workflow | Synthetic v1 manifest comparisons are available; real-card adapters and full-session goldens remain external/planned |
 
 The root Cargo workspace contains the portable domain, parsing, analytics,
@@ -37,17 +37,21 @@ Identity CLI
 Core library import
   caller-provided ImportSource + explicit fixed-offset clock context
     -> ResmedImporter discovery/candidate index
+    -> serial-verified STR anchors or bounded deterministic detail fallback
     -> opap-edf validation + affine calibration
-    -> bounded partial BRP sessions with stable opaque keys and warnings
+    -> source-selected MaskOn slices plus bounded BRP/SAD/SA2 detail
 ```
 
 There is no path from a real CPAP card to persisted and displayed sessions.
-Only validated uncompressed BRP waveforms are connected at the direct core
-library boundary. Supported flow is normalized to L/min and source
-calibration/timestamp provenance is retained. STR intervals/settings, PLD, EVE,
-CSL, SAD/SA2 payload decoding, compressed BRP, durable service execution,
-native import-job capability, and real UI therapy queries remain unavailable.
-The browser adapter continues to provide explicitly fabricated demo data.
+At the direct core boundary, serial-verified STR boundaries produce
+source-selected therapy slices (including summary-only sessions), with
+session-scoped provenance for bounded repairs. Validated uncompressed
+BRP/SAD/SA2 can add detail without inflating selected STR usage. Supported flow
+is normalized to L/min and source calibration/timestamp provenance is retained.
+STR settings/day summaries, PLD, EVE, CSL, AEV, compressed EDF, durable service
+execution, native import-job capability, and real UI therapy queries remain
+unavailable. The browser adapter continues to provide explicitly fabricated
+demo data.
 
 ## Intended end-to-end shape
 
@@ -103,13 +107,13 @@ privacy-hardening claim.
 ## Time and calculation contracts
 
 Device-local time, timezone context, correction provenance, and normalized UTC
-must remain distinguishable. The BRP slice requires an explicit fixed UTC
-offset, device-local reference time, and clock correction from its caller; it
-does not consult or guess from the host timezone. OSCAR-compatible STR day
-grouping and broader timestamp repair are not implemented. Clinically
-meaningful calculations need a versioned algorithm, named input channels,
-deterministic tests, and documented tolerances against the pinned OSCAR
-baseline.
+must remain distinguishable. The ResMed core slice requires an explicit fixed
+UTC offset, device-local reference time, and clock correction from its caller;
+it does not consult or guess from the host timezone. STR records are grouped by
+their device-local noon therapy day, while broader timezone inference and
+timestamp repair are not implemented. Clinically meaningful calculations need
+a versioned algorithm, named input channels, deterministic tests, and
+documented tolerances against the pinned OSCAR baseline.
 
 Until the remaining contracts are implemented and verified, the native
 application must show the value as unavailable rather than derive or fabricate

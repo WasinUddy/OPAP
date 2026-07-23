@@ -91,9 +91,19 @@ pub struct StrSelectedSignalLabels {
 pub struct StrTherapyBoundary {
     /// Zero-based source slot within the selected mask-on/off signals.
     pub source_slot: u16,
-    /// Raw digital minutes after the record's local-noon start.
+    /// Original signed digital value from the mask-on signal.
+    ///
+    /// Legacy serialized boundary indexes deserialize this as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_mask_on_value: Option<i16>,
+    /// Original signed digital value from the mask-off signal.
+    ///
+    /// Legacy serialized boundary indexes deserialize this as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_mask_off_value: Option<i16>,
+    /// Selected minutes after the record's local-noon start.
     pub mask_on_minute: u16,
-    /// Raw digital minutes after local noon, inclusive of the 1440-minute
+    /// Selected minutes after local noon, inclusive of the 1440-minute
     /// following-noon boundary used only by the bounded historical repair.
     pub mask_off_minute: u16,
     /// Repair applied to the source pair, if any.
@@ -701,6 +711,8 @@ fn decode_records(
                 }
                 boundaries.push(StrTherapyBoundary {
                     source_slot,
+                    source_mask_on_value: Some(on),
+                    source_mask_off_value: Some(off),
                     mask_on_minute: 0,
                     mask_off_minute: u16::try_from(off).expect("positive minute fits u16"),
                     repair: Some(StrBoundaryRepair::SlotZeroContinuation),
@@ -712,6 +724,8 @@ fn decode_records(
                 if record_day_number < current_resmed_day_number {
                     boundaries.push(StrTherapyBoundary {
                         source_slot,
+                        source_mask_on_value: Some(on),
+                        source_mask_off_value: Some(off),
                         mask_on_minute: u16::try_from(on).expect("positive minute fits u16"),
                         mask_off_minute: u16::try_from(MINUTES_PER_DAY)
                             .expect("minute bound fits u16"),
@@ -739,6 +753,8 @@ fn decode_records(
                 }
                 boundaries.push(StrTherapyBoundary {
                     source_slot,
+                    source_mask_on_value: Some(on),
+                    source_mask_off_value: Some(off),
                     mask_on_minute: u16::try_from(on).expect("positive minute fits u16"),
                     mask_off_minute: u16::try_from(off).expect("positive minute fits u16"),
                     repair: None,
@@ -910,6 +926,19 @@ mod tests {
         options: StrDecodeOptions<'_>,
     ) -> Result<StrBoundaryIndex, StrDecodeError> {
         super::decode_str_with_options(bytes, options)
+    }
+
+    #[test]
+    fn legacy_serialized_boundary_defaults_new_source_samples() {
+        let boundary: StrTherapyBoundary = serde_json::from_value(serde_json::json!({
+            "source_slot": 0,
+            "mask_on_minute": 100,
+            "mask_off_minute": 200
+        }))
+        .expect("legacy boundary remains readable");
+        assert_eq!(boundary.source_mask_on_value, None);
+        assert_eq!(boundary.source_mask_off_value, None);
+        assert_eq!(boundary.repair, None);
     }
 
     #[derive(Clone)]
@@ -1131,18 +1160,24 @@ mod tests {
             vec![
                 StrTherapyBoundary {
                     source_slot: 0,
+                    source_mask_on_value: Some(0),
+                    source_mask_off_value: Some(50),
                     mask_on_minute: 0,
                     mask_off_minute: 50,
                     repair: Some(StrBoundaryRepair::SlotZeroContinuation),
                 },
                 StrTherapyBoundary {
                     source_slot: 1,
+                    source_mask_on_value: Some(100),
+                    source_mask_off_value: Some(200),
                     mask_on_minute: 100,
                     mask_off_minute: 200,
                     repair: None,
                 },
                 StrTherapyBoundary {
                     source_slot: 2,
+                    source_mask_on_value: Some(300),
+                    source_mask_off_value: Some(0),
                     mask_on_minute: 300,
                     mask_off_minute: 1440,
                     repair: Some(StrBoundaryRepair::HistoricalTrailingNoon),
@@ -1154,6 +1189,8 @@ mod tests {
             decoded.days[1].boundaries,
             vec![StrTherapyBoundary {
                 source_slot: 0,
+                source_mask_on_value: Some(60),
+                source_mask_off_value: Some(120),
                 mask_on_minute: 60,
                 mask_off_minute: 120,
                 repair: None,
@@ -1405,12 +1442,16 @@ mod tests {
             vec![
                 StrTherapyBoundary {
                     source_slot: 1,
+                    source_mask_on_value: Some(200),
+                    source_mask_off_value: Some(250),
                     mask_on_minute: 200,
                     mask_off_minute: 250,
                     repair: None,
                 },
                 StrTherapyBoundary {
                     source_slot: 3,
+                    source_mask_on_value: Some(1439),
+                    source_mask_off_value: Some(1440),
                     mask_on_minute: 1439,
                     mask_off_minute: 1440,
                     repair: None,
@@ -1430,6 +1471,8 @@ mod tests {
             decoded.days[0].boundaries,
             vec![StrTherapyBoundary {
                 source_slot: 0,
+                source_mask_on_value: Some(100),
+                source_mask_off_value: Some(0),
                 mask_on_minute: 100,
                 mask_off_minute: 1440,
                 repair: Some(StrBoundaryRepair::HistoricalTrailingNoon),
@@ -1465,6 +1508,8 @@ mod tests {
             at_next_noon.days[0].boundaries[0],
             StrTherapyBoundary {
                 source_slot: 0,
+                source_mask_on_value: Some(100),
+                source_mask_off_value: Some(0),
                 mask_on_minute: 100,
                 mask_off_minute: 1440,
                 repair: Some(StrBoundaryRepair::HistoricalTrailingNoon),
@@ -1481,6 +1526,8 @@ mod tests {
             one_pm.days[0].boundaries,
             vec![StrTherapyBoundary {
                 source_slot: 0,
+                source_mask_on_value: Some(30),
+                source_mask_off_value: Some(60),
                 mask_on_minute: 30,
                 mask_off_minute: 60,
                 repair: None,
