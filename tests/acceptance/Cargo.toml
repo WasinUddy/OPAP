@@ -27,6 +27,11 @@ path = "tests/resmed_acceptance.rs"
 harness = false
 
 [[test]]
+name = "resmed_brp_import"
+path = "tests/resmed_brp_import.rs"
+harness = false
+
+[[test]]
 name = "service_acceptance"
 path = "tests/service_acceptance.rs"
 harness = false
