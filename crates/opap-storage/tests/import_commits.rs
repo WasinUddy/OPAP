@@ -404,7 +404,7 @@ fn completed_session_results_are_immutable_but_profile_cleanup_cascades() -> Tes
 
 #[test]
 fn running_result_links_require_the_jobs_exact_machine_and_profile() -> TestResult {
-    let (database, profile_id) = open_with_profile()?;
+    let (mut database, profile_id) = open_with_profile()?;
     let other_profile = database.profiles().insert(&NewProfile {
         display_name: "Other profile",
         now_ms: START_MS,
@@ -439,30 +439,53 @@ fn running_result_links_require_the_jobs_exact_machine_and_profile() -> TestResu
         serial_number: "",
         seen_at_ms: START_MS,
     })?;
-    let own_session = database.sessions().upsert(&NewSession {
+    let own_session = database
+        .replace_session_snapshot(
+            &NewSession {
+                machine_id: own_machine.id,
+                source_key: "session:owned",
+                started_at_ms: START_MS,
+                ended_at_ms: Some(END_MS),
+                timezone_offset_minutes: Some(0),
+                now_ms: END_MS,
+            },
+            &snapshot(DIGEST_A),
+        )?
+        .session;
+    let incomplete_session = database.sessions().upsert(&NewSession {
         machine_id: own_machine.id,
-        source_key: "session:owned",
+        source_key: "session:incomplete",
         started_at_ms: START_MS,
         ended_at_ms: Some(END_MS),
         timezone_offset_minutes: Some(0),
         now_ms: END_MS,
     })?;
-    let wrong_machine_session = database.sessions().upsert(&NewSession {
-        machine_id: other_machine_same_profile.id,
-        source_key: "session:wrong-machine",
-        started_at_ms: START_MS,
-        ended_at_ms: Some(END_MS),
-        timezone_offset_minutes: Some(0),
-        now_ms: END_MS,
-    })?;
-    let cross_profile_session = database.sessions().upsert(&NewSession {
-        machine_id: cross_profile_machine.id,
-        source_key: "session:cross-profile",
-        started_at_ms: START_MS,
-        ended_at_ms: Some(END_MS),
-        timezone_offset_minutes: Some(0),
-        now_ms: END_MS,
-    })?;
+    let wrong_machine_session = database
+        .replace_session_snapshot(
+            &NewSession {
+                machine_id: other_machine_same_profile.id,
+                source_key: "session:wrong-machine",
+                started_at_ms: START_MS,
+                ended_at_ms: Some(END_MS),
+                timezone_offset_minutes: Some(0),
+                now_ms: END_MS,
+            },
+            &snapshot(DIGEST_A),
+        )?
+        .session;
+    let cross_profile_session = database
+        .replace_session_snapshot(
+            &NewSession {
+                machine_id: cross_profile_machine.id,
+                source_key: "session:cross-profile",
+                started_at_ms: START_MS,
+                ended_at_ms: Some(END_MS),
+                timezone_offset_minutes: Some(0),
+                now_ms: END_MS,
+            },
+            &snapshot(DIGEST_A),
+        )?
+        .session;
     let job = claim_job(
         &database,
         profile_id,
@@ -483,6 +506,17 @@ fn running_result_links_require_the_jobs_exact_machine_and_profile() -> TestResu
          VALUES (?1, ?2, 'created')",
         rusqlite::params![job.id, own_session.id],
     )?;
+    assert!(
+        database
+            .connection()
+            .execute(
+                "INSERT INTO import_session_results (import_id, session_id, outcome)
+                 VALUES (?1, ?2, 'created')",
+                rusqlite::params![job.id, incomplete_session.id],
+            )
+            .is_err(),
+        "result links require complete session snapshots"
+    );
     for invalid_session_id in [wrong_machine_session.id, cross_profile_session.id] {
         assert!(
             database
@@ -496,6 +530,137 @@ fn running_result_links_require_the_jobs_exact_machine_and_profile() -> TestResu
         );
     }
     assert_eq!(database.imports().list_session_results(job.id)?.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn generation_terminal_states_and_completion_require_consistent_snapshot_artifacts() -> TestResult {
+    let (mut database, profile_id) = open_with_profile()?;
+    let machine = database.machines().upsert(&NewMachine {
+        profile_id,
+        source_key: "machine:artifact-guard",
+        device_type: "positive_airway_pressure",
+        manufacturer: "Test",
+        model: "Guard",
+        model_number: "",
+        serial_number: "",
+        seen_at_ms: START_MS,
+    })?;
+    let session_input = NewSession {
+        machine_id: machine.id,
+        source_key: "session:artifact-guard",
+        started_at_ms: START_MS,
+        ended_at_ms: Some(END_MS),
+        timezone_offset_minutes: Some(0),
+        now_ms: END_MS,
+    };
+    let stored = database
+        .replace_session_snapshot(&session_input, &snapshot(DIGEST_A))?
+        .session;
+    let job = claim_job(
+        &database,
+        profile_id,
+        REQUEST_ONE,
+        TOKEN_ONE,
+        DIGEST_A,
+        START_MS,
+    )?;
+    database.connection().execute(
+        "UPDATE import_history
+         SET machine_id = ?2, state_message = 'committing_result'
+         WHERE id = ?1",
+        rusqlite::params![job.id, machine.id],
+    )?;
+    database.connection().execute(
+        "INSERT INTO import_session_results (import_id, session_id, outcome)
+         VALUES (?1, ?2, 'created')",
+        rusqlite::params![job.id, stored.id],
+    )?;
+
+    for sql in [
+        "UPDATE import_history SET
+             status = 'blocked', state_message = 'retry_pending',
+             updated_at_ms = updated_at_ms + 1, execution_token = NULL
+         WHERE id = ?1",
+        "UPDATE import_history SET
+             status = 'failed', state_message = NULL,
+             error_message = 'internal_failure',
+             updated_at_ms = updated_at_ms + 1,
+             completed_at_ms = updated_at_ms + 1, execution_token = NULL
+         WHERE id = ?1",
+        "UPDATE import_history SET
+             status = 'cancelled', state_message = 'user_cancelled',
+             updated_at_ms = updated_at_ms + 1,
+             completed_at_ms = updated_at_ms + 1, execution_token = NULL
+         WHERE id = ?1",
+    ] {
+        assert!(
+            database.connection().execute(sql, [job.id]).is_err(),
+            "terminal non-completion states cannot retain session results"
+        );
+    }
+
+    let completion_sql = "UPDATE import_history SET
+             status = 'completed', state_message = NULL, error_message = NULL,
+             sessions_created = 1, sessions_updated = 0,
+             events_written = 1, waveform_chunks_written = 1,
+             updated_at_ms = updated_at_ms + 1,
+             completed_at_ms = updated_at_ms + 1, execution_token = NULL
+         WHERE id = ?1";
+    database.connection().execute(
+        "DELETE FROM session_summary WHERE session_id = ?1",
+        [stored.id],
+    )?;
+    assert!(
+        database
+            .connection()
+            .execute(completion_sql, [job.id])
+            .is_err(),
+        "completion requires a summary for every linked session"
+    );
+
+    database.replace_session_snapshot(
+        &NewSession {
+            now_ms: END_MS + 1,
+            ..session_input
+        },
+        &snapshot(DIGEST_A),
+    )?;
+    database.connection().execute(
+        "UPDATE session_provenance
+         SET importer_name = 'different-importer'
+         WHERE session_id = ?1",
+        [stored.id],
+    )?;
+    assert!(
+        database
+            .connection()
+            .execute(completion_sql, [job.id])
+            .is_err(),
+        "completion requires importer provenance to match the job"
+    );
+
+    database.replace_session_snapshot(
+        &NewSession {
+            now_ms: END_MS + 2,
+            ..session_input
+        },
+        &snapshot(DIGEST_A),
+    )?;
+    assert_eq!(database.connection().execute(completion_sql, [job.id])?, 1);
+    assert_eq!(
+        database
+            .imports()
+            .get(job.id)?
+            .expect("completed job")
+            .status,
+        ImportStatus::Completed
+    );
+
+    database
+        .connection()
+        .execute("DELETE FROM profiles WHERE id = ?1", [profile_id])?;
+    assert!(database.imports().get(job.id)?.is_none());
     Ok(())
 }
 
@@ -590,7 +755,69 @@ fn exact_replay_preserves_session_ids_and_records_unchanged_outcomes() -> TestRe
 }
 
 #[test]
-fn changed_content_updates_the_same_stable_sessions() -> TestResult {
+fn replay_repairs_snapshot_drift_even_when_provenance_is_unchanged() -> TestResult {
+    let (mut database, profile_id) = open_with_profile()?;
+    let first = claim_job(
+        &database,
+        profile_id,
+        REQUEST_ONE,
+        TOKEN_ONE,
+        DIGEST_A,
+        START_MS,
+    )?;
+    let imported_sessions = sessions(DIGEST_A);
+    let first_result = database.commit_import_result(
+        &commit_input(profile_id, &first, DIGEST_A, TOKEN_ONE, &imported_sessions),
+        || Ok(()),
+    )?;
+    let first_session_id = first_result.sessions[0].session_id;
+    let second_session_id = first_result.sessions[1].session_id;
+    database.connection().execute(
+        "UPDATE events SET channel_key = 'drifted-channel'
+         WHERE session_id = ?1",
+        [first_session_id],
+    )?;
+    database.connection().execute(
+        "DELETE FROM session_summary WHERE session_id = ?1",
+        [second_session_id],
+    )?;
+
+    let replay = claim_job(
+        &database,
+        profile_id,
+        REQUEST_TWO,
+        TOKEN_TWO,
+        DIGEST_A,
+        END_MS + 20,
+    )?;
+    let replay_result = database.commit_import_result(
+        &commit_input(profile_id, &replay, DIGEST_A, TOKEN_TWO, &imported_sessions),
+        || Ok(()),
+    )?;
+    assert!(
+        replay_result
+            .sessions
+            .iter()
+            .all(|result| result.outcome == ImportSessionOutcome::Updated)
+    );
+    assert_eq!(replay_result.history.sessions_updated, 2);
+    assert_eq!(replay_result.history.events_written, 2);
+    assert_eq!(replay_result.history.waveform_chunks_written, 2);
+    assert_eq!(
+        database.events().list_by_session(first_session_id)?[0].channel_key,
+        EVENTS[0].channel_key
+    );
+    assert!(
+        database
+            .session_snapshots()
+            .summary(second_session_id)?
+            .is_some()
+    );
+    Ok(())
+}
+
+#[test]
+fn changed_content_updates_the_same_stable_sessions_without_regressing_timestamps() -> TestResult {
     let (mut database, profile_id) = open_with_profile()?;
     let first = claim_job(
         &database,
@@ -605,6 +832,17 @@ fn changed_content_updates_the_same_stable_sessions() -> TestResult {
         &commit_input(profile_id, &first, DIGEST_A, TOKEN_ONE, &original_sessions),
         || Ok(()),
     )?;
+    let original_updated_at_ms = original
+        .sessions
+        .iter()
+        .map(|result| {
+            Ok(database
+                .sessions()
+                .get(result.session_id)?
+                .expect("original session")
+                .updated_at_ms)
+        })
+        .collect::<Result<Vec<_>, StorageError>>()?;
 
     let changed = claim_job(
         &database,
@@ -614,7 +852,10 @@ fn changed_content_updates_the_same_stable_sessions() -> TestResult {
         DIGEST_C,
         END_MS + 20,
     )?;
-    let changed_sessions = sessions(DIGEST_C);
+    let mut changed_sessions = sessions(DIGEST_C);
+    for session in &mut changed_sessions {
+        session.now_ms = START_MS;
+    }
     let updated = database.commit_import_result(
         &commit_input(
             profile_id,
@@ -645,6 +886,22 @@ fn changed_content_updates_the_same_stable_sessions() -> TestResult {
     );
     assert_eq!(updated.history.sessions_created, 0);
     assert_eq!(updated.history.sessions_updated, 2);
+    for (result, original_updated_at_ms) in updated.sessions.iter().zip(original_updated_at_ms) {
+        let stored = database
+            .sessions()
+            .get(result.session_id)?
+            .expect("updated session");
+        assert_eq!(stored.updated_at_ms, original_updated_at_ms);
+        assert!(stored.created_at_ms <= stored.updated_at_ms);
+        assert_eq!(
+            database
+                .session_snapshots()
+                .provenance(stored.id)?
+                .expect("updated provenance")
+                .content_digest,
+            DIGEST_C
+        );
+    }
     Ok(())
 }
 
@@ -731,6 +988,14 @@ fn initial_commit_cas_misses_return_typed_lease_and_timestamp_errors() -> TestRe
     stale_token.execution_token = TOKEN_TWO;
     assert!(matches!(
         database.commit_import_result(&stale_token, || Ok(())),
+        Err(StorageError::StaleImportExecution { id }) if id == job.id
+    ));
+
+    let mut stale_generation =
+        commit_input(profile_id, &job, DIGEST_A, TOKEN_ONE, &imported_sessions);
+    stale_generation.execution_generation += 1;
+    assert!(matches!(
+        database.commit_import_result(&stale_generation, || Ok(())),
         Err(StorageError::StaleImportExecution { id }) if id == job.id
     ));
 
@@ -823,6 +1088,73 @@ fn cancellation_checkpoint_wins_before_commit_and_rolls_back() -> TestResult {
 }
 
 #[test]
+fn final_post_sweep_checkpoint_can_still_roll_back_the_complete_commit() -> TestResult {
+    let (mut completed_database, completed_profile) = open_with_profile()?;
+    let completed_job = claim_job(
+        &completed_database,
+        completed_profile,
+        REQUEST_ONE,
+        TOKEN_ONE,
+        DIGEST_A,
+        START_MS,
+    )?;
+    let imported_sessions = sessions(DIGEST_A);
+    let mut total_checkpoints = 0_usize;
+    completed_database.commit_import_result(
+        &commit_input(
+            completed_profile,
+            &completed_job,
+            DIGEST_A,
+            TOKEN_ONE,
+            &imported_sessions,
+        ),
+        || {
+            total_checkpoints += 1;
+            Ok(())
+        },
+    )?;
+    assert!(total_checkpoints > 0);
+
+    let (mut interrupted_database, interrupted_profile) = open_with_profile()?;
+    let interrupted_job = claim_job(
+        &interrupted_database,
+        interrupted_profile,
+        REQUEST_ONE,
+        TOKEN_ONE,
+        DIGEST_A,
+        START_MS,
+    )?;
+    let mut reached = 0_usize;
+    let error = interrupted_database
+        .commit_import_result(
+            &commit_input(
+                interrupted_profile,
+                &interrupted_job,
+                DIGEST_A,
+                TOKEN_ONE,
+                &imported_sessions,
+            ),
+            || {
+                reached += 1;
+                if reached == total_checkpoints {
+                    Err(StorageError::ImportInterrupted)
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("the final checkpoint must precede the physical commit");
+    assert!(matches!(error, StorageError::ImportInterrupted));
+    assert_eq!(reached, total_checkpoints);
+    assert_no_import_output(
+        &interrupted_database,
+        interrupted_profile,
+        interrupted_job.id,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn cancellation_between_waveform_chunks_rolls_back_the_partial_chunk_set() -> TestResult {
     let (mut database, profile_id) = open_with_profile()?;
     let job = claim_job(
@@ -840,7 +1172,7 @@ fn cancellation_between_waveform_chunks_rolls_back_the_partial_chunk_set() -> Te
             &commit_input(profile_id, &job, DIGEST_A, TOKEN_ONE, &imported_sessions),
             || {
                 checkpoints += 1;
-                if checkpoints == 9 {
+                if checkpoints == 10 {
                     Err(StorageError::ImportInterrupted)
                 } else {
                     Ok(())
@@ -849,7 +1181,7 @@ fn cancellation_between_waveform_chunks_rolls_back_the_partial_chunk_set() -> Te
         )
         .expect_err("the second chunk checkpoint must interrupt the commit");
     assert!(matches!(error, StorageError::ImportInterrupted));
-    assert_eq!(checkpoints, 9);
+    assert_eq!(checkpoints, 10);
     assert_no_import_output(&database, profile_id, job.id)?;
     Ok(())
 }
@@ -892,17 +1224,16 @@ fn recovery_invalidates_a_stale_token_and_increments_generation() -> TestResult 
     assert_eq!(second_lease.execution_generation, 2);
 
     let imported_sessions = sessions(DIGEST_A);
+    let mut stale_commit = commit_input(
+        profile_id,
+        &first_lease,
+        DIGEST_A,
+        TOKEN_ONE,
+        &imported_sessions,
+    );
+    stale_commit.finished_at_ms = START_MS;
     let stale_error = database
-        .commit_import_result(
-            &commit_input(
-                profile_id,
-                &first_lease,
-                DIGEST_A,
-                TOKEN_ONE,
-                &imported_sessions,
-            ),
-            || Ok(()),
-        )
+        .commit_import_result(&stale_commit, || Ok(()))
         .expect_err("old lease must not commit");
     assert!(matches!(
         stale_error,
@@ -935,6 +1266,36 @@ fn worker_block_and_fail_cannot_mutate_a_newer_execution_generation() -> TestRes
         DIGEST_A,
         START_MS,
     )?;
+    let wrong_token_only = ImportExecutionLease {
+        profile_id,
+        importer_name: "resmed",
+        execution_token: TOKEN_TWO,
+        execution_generation: first.execution_generation,
+    };
+    assert!(matches!(
+        database.imports().block_execution(
+            first.id,
+            &wrong_token_only,
+            START_MS + 2,
+            ImportBlockCode::WorkerInterrupted,
+        ),
+        Err(StorageError::StaleImportExecution { id }) if id == first.id
+    ));
+    let wrong_generation_only = ImportExecutionLease {
+        profile_id,
+        importer_name: "resmed",
+        execution_token: TOKEN_ONE,
+        execution_generation: first.execution_generation + 1,
+    };
+    assert!(matches!(
+        database.imports().fail_execution(
+            first.id,
+            &wrong_generation_only,
+            START_MS + 2,
+            ImportFailureCode::InternalFailure,
+        ),
+        Err(StorageError::StaleImportExecution { id }) if id == first.id
+    ));
     database
         .imports()
         .recover_running(START_MS + 2, "application restarted")?;
@@ -965,7 +1326,7 @@ fn worker_block_and_fail_cannot_mutate_a_newer_execution_generation() -> TestRes
             .block_execution(
                 first.id,
                 &stale,
-                START_MS + 4,
+                START_MS,
                 ImportBlockCode::WorkerInterrupted,
             ),
         Err(StorageError::StaleImportExecution { id }) if id == first.id
@@ -976,7 +1337,7 @@ fn worker_block_and_fail_cannot_mutate_a_newer_execution_generation() -> TestRes
             .fail_execution(
                 first.id,
                 &stale,
-                START_MS + 4,
+                START_MS,
                 ImportFailureCode::InternalFailure,
             ),
         Err(StorageError::StaleImportExecution { id }) if id == first.id
@@ -1082,6 +1443,30 @@ fn leased_outcomes_reject_sensitive_free_text_even_through_direct_sql() -> TestR
          WHERE id = ?1",
         "UPDATE import_history SET
              status = 'blocked',
+             state_message = 'retry_pending',
+             sessions_created = 1,
+             updated_at_ms = updated_at_ms + 1,
+             execution_token = NULL
+         WHERE id = ?1",
+        "UPDATE import_history SET
+             status = 'failed',
+             state_message = NULL,
+             error_message = 'internal_failure',
+             sessions_updated = 1,
+             updated_at_ms = updated_at_ms + 1,
+             completed_at_ms = updated_at_ms + 1,
+             execution_token = NULL
+         WHERE id = ?1",
+        "UPDATE import_history SET
+             status = 'cancelled',
+             state_message = 'user_cancelled',
+             events_written = 1,
+             updated_at_ms = updated_at_ms + 1,
+             completed_at_ms = updated_at_ms + 1,
+             execution_token = NULL
+         WHERE id = ?1",
+        "UPDATE import_history SET
+             status = 'blocked',
              state_message = '/Users/alice/private-card',
              updated_at_ms = updated_at_ms + 1,
              execution_token = NULL
@@ -1117,6 +1502,85 @@ fn leased_outcomes_reject_sensitive_free_text_even_through_direct_sql() -> TestR
     assert_eq!(unchanged.execution_token.as_deref(), Some(TOKEN_ONE));
     assert_eq!(unchanged.state_message, None);
     assert_eq!(unchanged.error_message, None);
+    Ok(())
+}
+
+#[test]
+fn begin_import_rejects_loader_names_that_execution_claims_cannot_use() -> TestResult {
+    let (database, profile_id) = open_with_profile()?;
+    let invalid_loaders = [String::new(), "x".repeat(129), "resmed\0private".to_owned()];
+    for loader_name in &invalid_loaders {
+        let error = database
+            .imports()
+            .begin_or_get(&NewImport {
+                profile_id,
+                machine_id: None,
+                import_key: REQUEST_ONE,
+                source_uri: SOURCE_ID,
+                loader_name,
+                initial_status: InitialImportStatus::Blocked,
+                state_message: None,
+                created_at_ms: START_MS,
+            })
+            .expect_err("invalid loader names must fail before persistence");
+        assert!(matches!(error, StorageError::Integrity(_)));
+    }
+    assert!(database.imports().list_by_profile(profile_id)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn v10_insert_guard_rejects_forged_execution_terminal_and_counter_state() -> TestResult {
+    let (database, profile_id) = open_with_profile()?;
+    for sql in [
+        format!(
+            "INSERT INTO import_history (
+                 profile_id, import_key, source_uri, loader_name, attempt,
+                 status, created_at_ms, updated_at_ms, started_at_ms,
+                 source_fingerprint, input_digest, options_digest,
+                 execution_generation, execution_token
+             ) VALUES (
+                 {profile_id}, '{REQUEST_ONE}', '{SOURCE_ID}', 'resmed', 1,
+                 'running', {START_MS}, {START_MS}, {START_MS},
+                 '{DIGEST_A}', '{DIGEST_A}', '{DIGEST_A}', 1, '{TOKEN_ONE}'
+             )"
+        ),
+        format!(
+            "INSERT INTO import_history (
+                 profile_id, import_key, source_uri, loader_name, attempt,
+                 status, created_at_ms, updated_at_ms, started_at_ms,
+                 completed_at_ms, sessions_created
+             ) VALUES (
+                 {profile_id}, '{REQUEST_ONE}', '{SOURCE_ID}', 'resmed', 1,
+                 'completed', {START_MS}, {START_MS}, {START_MS}, {START_MS}, 1
+             )"
+        ),
+        format!(
+            "INSERT INTO import_history (
+                 profile_id, import_key, source_uri, loader_name, attempt,
+                 status, created_at_ms, updated_at_ms, sessions_updated
+             ) VALUES (
+                 {profile_id}, '{REQUEST_ONE}', '{SOURCE_ID}', 'resmed', 1,
+                 'blocked', {START_MS}, {START_MS}, 1
+             )"
+        ),
+        format!(
+            "INSERT INTO import_history (
+                 profile_id, import_key, source_uri, loader_name, attempt,
+                 status, created_at_ms, updated_at_ms
+             ) VALUES (
+                 {profile_id}, '{REQUEST_ONE}', '{SOURCE_ID}',
+                 'resmed' || char(0) || 'private', 1,
+                 'blocked', {START_MS}, {START_MS}
+             )"
+        ),
+    ] {
+        assert!(
+            database.connection().execute(&sql, []).is_err(),
+            "v10 insert guard must reject forged import state"
+        );
+    }
+    assert!(database.imports().list_by_profile(profile_id)?.is_empty());
     Ok(())
 }
 

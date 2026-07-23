@@ -242,6 +242,16 @@ fn create_legacy_database(path: &Path, version: usize) -> Result<(), Box<dyn Err
             "session_snapshots",
             include_str!("../migrations/0008_session_snapshots.sql"),
         ),
+        (
+            9_i64,
+            "atomic_import_commits",
+            include_str!("../migrations/0009_atomic_import_commits.sql"),
+        ),
+        (
+            10_i64,
+            "import_snapshot_integrity",
+            include_str!("../migrations/0010_import_snapshot_integrity.sql"),
+        ),
     ];
     for (migration_version, name, sql) in migrations.into_iter().take(version) {
         connection.execute_batch(sql)?;
@@ -298,14 +308,43 @@ fn fresh_schema_has_all_strict_snapshot_tables() -> TestResult {
             .applied_migrations()?
             .last()
             .map(|migration| (migration.version, migration.name.as_str())),
-        Some((9, "atomic_import_commits"))
+        Some((10, "import_snapshot_integrity"))
     );
     Ok(())
 }
 
 #[test]
-fn upgrades_every_v1_through_v8_database_without_losing_sessions() -> TestResult {
-    for version in 1_usize..=8 {
+fn reopening_rejects_partial_v8_snapshot_child_sets() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("partial-snapshot.sqlite3");
+    let database = Database::open(&path)?;
+    database.connection().execute_batch(
+        "INSERT INTO profiles (id, display_name, created_at_ms, updated_at_ms)
+         VALUES (1, 'Partial snapshot', 1, 1);
+         INSERT INTO machines (
+             id, profile_id, source_key, device_type, manufacturer, model,
+             model_number, serial_number, first_seen_at_ms, last_seen_at_ms
+         ) VALUES (1, 1, 'machine:partial', 'pap', '', '', '', '', 1, 1);
+         INSERT INTO sessions (
+             id, machine_id, source_key, started_at_ms, ended_at_ms,
+             timezone_offset_minutes, created_at_ms, updated_at_ms
+         ) VALUES (1, 1, 'session:partial', 10, 20, 0, 1, 1);
+         INSERT INTO session_slices (
+             session_id, sequence, source_key, state, started_at_ms, ended_at_ms
+         ) VALUES (1, 0, 'slice:partial', 'mask_on', 10, 20);",
+    )?;
+    drop(database);
+
+    let error = Database::open(&path)
+        .err()
+        .expect("partial persisted snapshot must fail open-time integrity validation");
+    assert!(matches!(error, StorageError::Integrity(_)));
+    Ok(())
+}
+
+#[test]
+fn upgrades_every_v1_through_v9_database_without_losing_sessions() -> TestResult {
+    for version in 1_usize..=9 {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join(format!("legacy-v{version}.sqlite3"));
         create_legacy_database(&path, version)?;
@@ -434,6 +473,86 @@ fn failed_v9_migration_rolls_back_added_columns_and_tables() -> TestResult {
         |row| row.get(0),
     )?;
     assert_eq!(incompatible_column, "incompatible");
+    Ok(())
+}
+
+#[test]
+fn failed_v10_migration_rolls_back_all_new_integrity_triggers() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("v10-rollback.sqlite3");
+    create_legacy_database(&path, 9)?;
+    let connection = rusqlite::Connection::open(&path)?;
+    connection.execute_batch(
+        "CREATE TRIGGER import_session_results_validate_snapshot_insert
+         BEFORE INSERT ON import_session_results
+         BEGIN
+             SELECT RAISE(ABORT, 'preexisting incompatible trigger');
+         END;",
+    )?;
+    drop(connection);
+
+    assert!(Database::open(&path).is_err());
+    let unchanged = rusqlite::Connection::open(&path)?;
+    let user_version: i64 = unchanged.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let history_version: i64 =
+        unchanged.query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })?;
+    assert_eq!((user_version, history_version), (9, 9));
+    for rolled_back in [
+        "import_history_validate_initial_insert",
+        "import_history_validate_generation_artifacts",
+    ] {
+        let count: i64 = unchanged.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'trigger' AND name = ?1",
+            [rolled_back],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 0, "{rolled_back} must have rolled back");
+    }
+    Ok(())
+}
+
+#[test]
+fn v10_integrity_scan_rolls_back_migration_for_partial_legacy_snapshots() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("v10-integrity-rollback.sqlite3");
+    create_legacy_database(&path, 9)?;
+    let connection = rusqlite::Connection::open(&path)?;
+    connection.execute(
+        "INSERT INTO session_slices (
+             session_id, sequence, source_key, state, started_at_ms, ended_at_ms
+         ) VALUES (1, 0, 'slice:partial', 'mask_on', 10, 20)",
+        [],
+    )?;
+    drop(connection);
+
+    let error = Database::open(&path)
+        .err()
+        .expect("partial legacy snapshot must fail the v10 integrity scan");
+    assert!(matches!(error, StorageError::Integrity(_)));
+    let unchanged = rusqlite::Connection::open(&path)?;
+    let versions: (i64, i64) = unchanged.query_row(
+        "SELECT
+             (SELECT user_version FROM pragma_user_version),
+             (SELECT MAX(version) FROM schema_migrations)",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(versions, (9, 9));
+    let v10_triggers: i64 = unchanged.query_row(
+        "SELECT COUNT(*) FROM sqlite_schema
+         WHERE type = 'trigger'
+           AND name IN (
+               'import_history_validate_initial_insert',
+               'import_history_validate_generation_artifacts',
+               'import_session_results_validate_snapshot_insert'
+           )",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(v10_triggers, 0);
     Ok(())
 }
 
@@ -769,6 +888,123 @@ fn database_failure_rolls_back_session_and_all_snapshot_children() -> TestResult
     assert_eq!(stored.slices.len(), 2);
     assert_eq!(stored.summary.metrics.len(), 2);
     assert_eq!(stored.settings.len(), 4);
+    Ok(())
+}
+
+#[test]
+fn ignored_snapshot_inserts_and_deletes_are_detected_and_rolled_back() -> TestResult {
+    {
+        let (mut database, machine_id) = database_with_machine()?;
+        database.connection().execute_batch(
+            "CREATE TRIGGER test_ignore_summary_metric
+             BEFORE INSERT ON summary_metrics
+             BEGIN
+                 SELECT RAISE(IGNORE);
+             END;",
+        )?;
+        let replacement = snapshot(
+            CONTENT_DIGEST,
+            SessionDataReplacement {
+                events: &EVENTS,
+                waveforms: &WAVEFORMS,
+            },
+            &SLICES,
+            &METRICS,
+            &SETTINGS,
+        );
+        let error = database
+            .replace_session_snapshot(&session(machine_id, END_MS, END_MS + 1), &replacement)
+            .expect_err("an ignored metric insert must fail the replacement");
+        assert!(matches!(error, StorageError::Integrity(_)));
+        assert!(database.sessions().list_by_machine(machine_id)?.is_empty());
+    }
+
+    {
+        let (mut database, machine_id) = database_with_machine()?;
+        let replacement = snapshot(
+            CONTENT_DIGEST,
+            SessionDataReplacement {
+                events: &EVENTS,
+                waveforms: &WAVEFORMS,
+            },
+            &SLICES,
+            &METRICS,
+            &SETTINGS,
+        );
+        let stored = database
+            .replace_session_snapshot(&session(machine_id, END_MS, END_MS + 1), &replacement)?;
+        database.connection().execute_batch(
+            "CREATE TRIGGER test_ignore_slice_delete
+             BEFORE DELETE ON session_slices
+             BEGIN
+                 SELECT RAISE(IGNORE);
+             END;",
+        )?;
+        let reduced = snapshot(
+            UPDATED_DIGEST,
+            SessionDataReplacement {
+                events: &EVENTS,
+                waveforms: &WAVEFORMS,
+            },
+            &[],
+            &METRICS,
+            &SETTINGS,
+        );
+        let error = database
+            .replace_session_snapshot(&session(machine_id, END_MS, END_MS + 2), &reduced)
+            .expect_err("an ignored slice delete must fail the replacement");
+        assert!(matches!(error, StorageError::Integrity(_)));
+        assert_eq!(
+            database
+                .session_snapshots()
+                .get(stored.session.id)?
+                .expect("original snapshot")
+                .slices
+                .len(),
+            SLICES.len()
+        );
+    }
+
+    {
+        let (mut database, machine_id) = database_with_machine()?;
+        let replacement = snapshot(
+            CONTENT_DIGEST,
+            SessionDataReplacement {
+                events: &EVENTS,
+                waveforms: &WAVEFORMS,
+            },
+            &SLICES,
+            &METRICS,
+            &SETTINGS,
+        );
+        let stored = database
+            .replace_session_snapshot(&session(machine_id, END_MS, END_MS + 1), &replacement)?;
+        database.connection().execute_batch(
+            "CREATE TRIGGER test_ignore_event_delete
+             BEFORE DELETE ON events
+             BEGIN
+                 SELECT RAISE(IGNORE);
+             END;",
+        )?;
+        let reduced = snapshot(
+            UPDATED_DIGEST,
+            SessionDataReplacement {
+                events: &[],
+                waveforms: &WAVEFORMS,
+            },
+            &SLICES,
+            &METRICS,
+            &SETTINGS,
+        );
+        let error = database
+            .replace_session_snapshot(&session(machine_id, END_MS, END_MS + 2), &reduced)
+            .expect_err("an ignored event delete must fail the replacement");
+        assert!(matches!(error, StorageError::Integrity(_)));
+        assert_eq!(
+            database.events().list_by_session(stored.session.id)?.len(),
+            EVENTS.len()
+        );
+    }
     Ok(())
 }
 

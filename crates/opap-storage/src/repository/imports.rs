@@ -28,6 +28,7 @@ impl<'connection> Imports<'connection> {
     /// explicitly blocked or running, so preparation never masquerades as work.
     /// Repeating the same logical import returns its latest attempt.
     pub fn begin_or_get(&self, input: &NewImport<'_>) -> Result<BeginImport> {
+        validate_importer_name(input.loader_name)?;
         if !is_canonical_request_id(input.import_key) {
             return Err(Error::Integrity(
                 "new import key must be a service-generated OPAP request identifier".to_owned(),
@@ -257,7 +258,7 @@ impl<'connection> Imports<'connection> {
                 map_import,
             )
             .optional()?;
-        self.resolve_execution_update(id, at_ms, updated)
+        self.resolve_execution_update(id, lease, at_ms, updated)
     }
 
     /// Fails only the exact running execution lease owned by a worker.
@@ -302,7 +303,7 @@ impl<'connection> Imports<'connection> {
                 map_import,
             )
             .optional()?;
-        self.resolve_execution_update(id, at_ms, updated)
+        self.resolve_execution_update(id, lease, at_ms, updated)
     }
 
     /// Applies a typed state-machine command. A missing id returns `None`; a row
@@ -550,6 +551,7 @@ impl<'connection> Imports<'connection> {
                 "stored import key is not an opaque OPAP request identifier".to_owned(),
             ));
         }
+        validate_importer_name(&source.loader_name)?;
         let previous_at_ms = source
             .updated_at_ms
             .max(source.completed_at_ms.unwrap_or(source.updated_at_ms));
@@ -638,6 +640,7 @@ impl<'connection> Imports<'connection> {
     fn resolve_execution_update(
         &self,
         id: i64,
+        lease: &ImportExecutionLease<'_>,
         attempted_at_ms: i64,
         updated: Option<ImportHistory>,
     ) -> Result<Option<ImportHistory>> {
@@ -646,7 +649,14 @@ impl<'connection> Imports<'connection> {
         }
         match self.get(id)? {
             None => Ok(None),
-            Some(history) if attempted_at_ms < history.updated_at_ms => {
+            Some(history)
+                if history.profile_id == lease.profile_id
+                    && history.loader_name == lease.importer_name
+                    && history.status == ImportStatus::Running
+                    && history.execution_token.as_deref() == Some(lease.execution_token)
+                    && history.execution_generation == lease.execution_generation
+                    && attempted_at_ms < history.updated_at_ms =>
+            {
                 Err(Error::ImportTimestampRegression {
                     id,
                     previous_at_ms: history.updated_at_ms,
@@ -725,18 +735,23 @@ fn validate_execution_lease(lease: &ImportExecutionLease<'_>) -> Result<()> {
             "execution lease profile id and generation must be positive".to_owned(),
         ));
     }
-    if lease.importer_name.is_empty()
-        || lease.importer_name.len() > 128
-        || lease.importer_name.as_bytes().contains(&0)
-    {
-        return Err(Error::Integrity(
-            "execution lease importer name must be non-empty and at most 128 bytes without NUL characters"
-                .to_owned(),
-        ));
-    }
+    validate_importer_name(lease.importer_name)?;
     if !is_canonical_execution_token(lease.execution_token) {
         return Err(Error::Integrity(
             "execution token must be a service-generated OPAP identifier".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_importer_name(importer_name: &str) -> Result<()> {
+    if importer_name.is_empty()
+        || importer_name.len() > 128
+        || importer_name.as_bytes().contains(&0)
+    {
+        return Err(Error::Integrity(
+            "importer name must be non-empty and at most 128 bytes without NUL characters"
+                .to_owned(),
         ));
     }
     Ok(())

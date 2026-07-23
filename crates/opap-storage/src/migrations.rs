@@ -2,7 +2,7 @@ use crate::{Error, Result};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 pub const APPLICATION_ID: i32 = i32::from_be_bytes(*b"OPAP");
-pub const LATEST_SCHEMA_VERSION: i64 = 9;
+pub const LATEST_SCHEMA_VERSION: i64 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationRecord {
@@ -18,6 +18,7 @@ struct Migration {
 }
 
 const V9_MIGRATION_SQL: &str = include_str!("../migrations/0009_atomic_import_commits.sql");
+const V10_MIGRATION_SQL: &str = include_str!("../migrations/0010_import_snapshot_integrity.sql");
 
 const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -64,6 +65,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 9,
         name: "atomic_import_commits",
         sql: V9_MIGRATION_SQL,
+    },
+    Migration {
+        version: 10,
+        name: "import_snapshot_integrity",
+        sql: V10_MIGRATION_SQL,
     },
 ];
 
@@ -121,6 +127,9 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     for migration in MIGRATIONS.iter().filter(|item| item.version > current) {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute_batch(migration.sql)?;
+        if migration.version == 10 {
+            validate_v10_data_integrity(&transaction)?;
+        }
         transaction.execute(
             "INSERT INTO schema_migrations (version, name, applied_at_ms)
              VALUES (?1, ?2, unixepoch() * 1000)",
@@ -132,6 +141,7 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     }
 
     validate_schema_fingerprint(connection)?;
+    validate_v10_data_integrity(connection)?;
     connection.pragma_update(None, "application_id", APPLICATION_ID)?;
     validate_foreign_keys(connection)?;
     truncate_wal(connection)?;
@@ -281,6 +291,9 @@ fn validate_schema_fingerprint(connection: &Connection) -> Result<()> {
         "import_session_results_validate_job_insert",
         "import_session_results_protect_update",
         "import_session_results_protect_delete",
+        "import_history_validate_initial_insert",
+        "import_history_validate_generation_artifacts",
+        "import_session_results_validate_snapshot_insert",
     ];
 
     for (table, probe) in TABLES {
@@ -365,6 +378,20 @@ fn validate_schema_fingerprint(connection: &Connection) -> Result<()> {
     ] {
         let actual = require_schema_object(connection, "trigger", trigger)?;
         let expected = v9_migration_trigger_sql(trigger)?;
+        if canonical_trigger_sql(&actual) != canonical_trigger_sql(expected) {
+            return Err(Error::InvalidSchemaFingerprint(format!(
+                "critical trigger {trigger:?} does not match its canonical guard"
+            )));
+        }
+    }
+
+    for trigger in [
+        "import_history_validate_initial_insert",
+        "import_history_validate_generation_artifacts",
+        "import_session_results_validate_snapshot_insert",
+    ] {
+        let actual = require_schema_object(connection, "trigger", trigger)?;
+        let expected = migration_trigger_sql(V10_MIGRATION_SQL, 10, trigger)?;
         if canonical_trigger_sql(&actual) != canonical_trigger_sql(expected) {
             return Err(Error::InvalidSchemaFingerprint(format!(
                 "critical trigger {trigger:?} does not match its canonical guard"
@@ -491,19 +518,134 @@ fn canonical_trigger_sql(sql: &str) -> &str {
 }
 
 fn v9_migration_trigger_sql(name: &str) -> Result<&'static str> {
+    migration_trigger_sql(V9_MIGRATION_SQL, 9, name)
+}
+
+fn migration_trigger_sql(
+    migration_sql: &'static str,
+    version: i64,
+    name: &str,
+) -> Result<&'static str> {
     let marker = format!("CREATE TRIGGER {name}\n");
-    let start = V9_MIGRATION_SQL.find(&marker).ok_or_else(|| {
+    let start = migration_sql.find(&marker).ok_or_else(|| {
         Error::InvalidSchemaFingerprint(format!(
-            "critical trigger {name:?} is absent from the canonical v9 migration"
+            "critical trigger {name:?} is absent from the canonical v{version} migration"
         ))
     })?;
-    let statement = &V9_MIGRATION_SQL[start..];
+    let statement = &migration_sql[start..];
     let end = statement.find("\nEND;").ok_or_else(|| {
         Error::InvalidSchemaFingerprint(format!(
-            "critical trigger {name:?} is incomplete in the canonical v9 migration"
+            "critical trigger {name:?} is incomplete in the canonical v{version} migration"
         ))
     })?;
     Ok(&statement[..end + "\nEND".len()])
+}
+
+fn validate_v10_data_integrity(connection: &Connection) -> Result<()> {
+    let partial_snapshot = connection
+        .query_row(
+            "SELECT session.id
+             FROM sessions AS session
+             WHERE (
+                 EXISTS (
+                     SELECT 1 FROM session_provenance
+                     WHERE session_id = session.id
+                 )
+                 OR EXISTS (
+                     SELECT 1 FROM session_slices
+                     WHERE session_id = session.id
+                 )
+                 OR EXISTS (
+                     SELECT 1 FROM session_summary
+                     WHERE session_id = session.id
+                 )
+                 OR EXISTS (
+                     SELECT 1 FROM session_settings
+                     WHERE session_id = session.id
+                 )
+             )
+             AND (
+                 NOT EXISTS (
+                     SELECT 1 FROM session_provenance
+                     WHERE session_id = session.id
+                 )
+                 OR NOT EXISTS (
+                     SELECT 1 FROM session_summary
+                     WHERE session_id = session.id
+                 )
+             )
+             ORDER BY session.id
+             LIMIT 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    if let Some(session_id) = partial_snapshot {
+        return Err(Error::Integrity(format!(
+            "session {session_id} has an incomplete persisted snapshot"
+        )));
+    }
+
+    let invalid_result = connection
+        .query_row(
+            "SELECT result.import_id, result.session_id
+             FROM import_session_results AS result
+             JOIN import_history AS history
+                 ON history.id = result.import_id
+             JOIN sessions AS session
+                 ON session.id = result.session_id
+             JOIN machines AS machine
+                 ON machine.id = session.machine_id
+             LEFT JOIN session_provenance AS provenance
+                 ON provenance.session_id = session.id
+             LEFT JOIN session_summary AS summary
+                 ON summary.session_id = session.id
+             WHERE history.machine_id IS NOT session.machine_id
+                OR history.profile_id IS NOT machine.profile_id
+                OR provenance.session_id IS NULL
+                OR provenance.importer_name IS NOT history.loader_name
+                OR summary.session_id IS NULL
+             ORDER BY result.import_id, result.session_id
+             LIMIT 1",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+    if let Some((import_id, session_id)) = invalid_result {
+        return Err(Error::Integrity(format!(
+            "import {import_id} links incomplete or mismatched session {session_id}"
+        )));
+    }
+
+    let invalid_terminal = connection
+        .query_row(
+            "SELECT history.id
+             FROM import_history AS history
+             WHERE history.execution_generation > 0
+               AND history.status IN ('blocked', 'failed', 'cancelled')
+               AND (
+                   history.sessions_created <> 0
+                   OR history.sessions_updated <> 0
+                   OR history.events_written <> 0
+                   OR history.waveform_chunks_written <> 0
+                   OR EXISTS (
+                       SELECT 1
+                       FROM import_session_results
+                       WHERE import_id = history.id
+                   )
+               )
+             ORDER BY history.id
+             LIMIT 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    if let Some(import_id) = invalid_terminal {
+        return Err(Error::Integrity(format!(
+            "generation-scoped import {import_id} has invalid terminal artifacts"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_foreign_keys(connection: &Connection) -> Result<()> {

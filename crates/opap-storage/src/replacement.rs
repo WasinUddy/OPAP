@@ -104,6 +104,7 @@ pub(crate) fn replace_session_snapshot_on_with_checkpoint(
         replacement,
         checkpoint,
     )?;
+    checkpoint()?;
     Ok(SessionSnapshotReplacementResult {
         session,
         stats: SessionSnapshotReplacementStats {
@@ -165,7 +166,11 @@ fn replace_session_data_on_with_checkpoint(
         .collect::<Vec<_>>();
     for event in &stale_events {
         checkpoint()?;
-        Events::new(connection).delete(event.id)?;
+        if !Events::new(connection).delete(event.id)? {
+            return Err(Error::Integrity(
+                "authoritative event deletion affected no row".to_owned(),
+            ));
+        }
     }
 
     let existing_waveforms = Waveforms::new(connection).list_metadata_by_session(session_id)?;
@@ -181,7 +186,13 @@ fn replace_session_data_on_with_checkpoint(
         if let Some(existing) =
             repository.find_metadata_by_source_key(session_id, waveform.source_key)?
         {
-            repository.delete_chunks(existing.id)?;
+            let expected_chunks = repository.list_chunks(existing.id)?.len();
+            let deleted_chunks = repository.delete_chunks(existing.id)?;
+            if deleted_chunks != expected_chunks {
+                return Err(Error::Integrity(format!(
+                    "waveform chunk deletion affected {deleted_chunks} rows; expected {expected_chunks}"
+                )));
+            }
         }
         let metadata = repository.upsert_metadata(&NewWaveformMetadata {
             session_id,
@@ -217,8 +228,13 @@ fn replace_session_data_on_with_checkpoint(
         .collect::<Vec<_>>();
     for waveform in &stale_waveforms {
         checkpoint()?;
-        Waveforms::new(connection).delete_metadata(waveform.id)?;
+        if !Waveforms::new(connection).delete_metadata(waveform.id)? {
+            return Err(Error::Integrity(
+                "authoritative waveform deletion affected no row".to_owned(),
+            ));
+        }
     }
+    checkpoint()?;
 
     let stats = SessionReplacementStats {
         events_written: replacement.events.len(),

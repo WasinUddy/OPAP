@@ -3,9 +3,8 @@
 
 use opap_core::{ImportError, ImportErrorKind};
 use opap_storage::Error as StorageError;
-use rusqlite::ErrorCode as SqliteErrorCode;
 use serde::{Deserialize, Serialize};
-use std::{fmt, io::ErrorKind as IoErrorKind};
+use std::fmt;
 
 pub type ApiResult<T> = Result<T, ApiError>;
 
@@ -60,15 +59,9 @@ impl ApiError {
     }
 
     pub(crate) fn storage(error: StorageError) -> Self {
+        let retryable = error.is_retryable();
         match error {
-            StorageError::Io(error) => {
-                let retryable = matches!(
-                    error.kind(),
-                    IoErrorKind::Interrupted | IoErrorKind::WouldBlock | IoErrorKind::TimedOut
-                );
-                storage_unavailable(retryable)
-            }
-            StorageError::Sqlite(error) => storage_unavailable(sqlite_error_is_retryable(&error)),
+            StorageError::Io(_) | StorageError::Sqlite(_) => storage_unavailable(retryable),
             StorageError::SchemaTooNew { .. } => Self::new(
                 ApiErrorCode::StorageUnavailable,
                 "local storage was created by a newer OPAP version",
@@ -95,19 +88,6 @@ impl ApiError {
             ),
         }
     }
-}
-
-fn sqlite_error_is_retryable(error: &rusqlite::Error) -> bool {
-    let rusqlite::Error::SqliteFailure(failure, _) = error else {
-        return false;
-    };
-
-    matches!(
-        failure.code,
-        SqliteErrorCode::DatabaseBusy
-            | SqliteErrorCode::DatabaseLocked
-            | SqliteErrorCode::OperationInterrupted
-    )
 }
 
 fn storage_unavailable(retryable: bool) -> ApiError {
@@ -199,6 +179,7 @@ impl std::error::Error for ApiError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::ErrorKind as IoErrorKind;
 
     #[test]
     fn error_code_has_stable_json_and_display_forms() {
@@ -251,47 +232,49 @@ mod tests {
     }
 
     #[test]
-    fn transient_io_and_sqlite_failures_are_retryable_without_leaking_details() {
+    fn service_retryability_matches_the_storage_error_contract() {
         for kind in [
             IoErrorKind::Interrupted,
             IoErrorKind::WouldBlock,
             IoErrorKind::TimedOut,
+            IoErrorKind::PermissionDenied,
         ] {
-            let api = ApiError::storage(StorageError::Io(std::io::Error::new(
-                kind,
-                "private database path",
-            )));
+            let storage_error =
+                StorageError::Io(std::io::Error::new(kind, "private database path"));
+            let expected_retryable = storage_error.is_retryable();
+            let api = ApiError::storage(storage_error);
             assert_eq!(api.code, ApiErrorCode::StorageUnavailable);
-            assert!(api.retryable);
+            assert_eq!(api.retryable, expected_retryable);
+            assert!(api.retryable, "I/O kind {kind:?}");
             assert!(!api.message.contains("private"));
         }
 
         for result_code in [
             rusqlite::ffi::SQLITE_BUSY,
             rusqlite::ffi::SQLITE_LOCKED,
-            rusqlite::ffi::SQLITE_INTERRUPT,
+            rusqlite::ffi::SQLITE_CANTOPEN,
+            rusqlite::ffi::SQLITE_CANTOPEN_SYMLINK,
+            rusqlite::ffi::SQLITE_IOERR,
+            rusqlite::ffi::SQLITE_IOERR_AUTH,
+            rusqlite::ffi::SQLITE_IOERR_DATA,
+            rusqlite::ffi::SQLITE_IOERR_CORRUPTFS,
         ] {
             let sqlite = rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(result_code),
                 Some("private SQLite details".to_owned()),
             );
-            let api = ApiError::storage(StorageError::Sqlite(sqlite));
+            let storage_error = StorageError::Sqlite(sqlite);
+            let expected_retryable = storage_error.is_retryable();
+            let api = ApiError::storage(storage_error);
             assert_eq!(api.code, ApiErrorCode::StorageUnavailable);
+            assert_eq!(api.retryable, expected_retryable);
             assert!(api.retryable, "SQLite result code {result_code}");
             assert!(!api.message.contains("private"));
         }
     }
 
     #[test]
-    fn permission_schema_and_integrity_failures_are_permanent_and_sanitized() {
-        let permission = ApiError::storage(StorageError::Io(std::io::Error::new(
-            IoErrorKind::PermissionDenied,
-            "/Users/private/opap.sqlite3",
-        )));
-        assert_eq!(permission.code, ApiErrorCode::StorageUnavailable);
-        assert!(!permission.retryable);
-        assert!(!permission.message.contains("/Users"));
-
+    fn non_retryable_sqlite_schema_and_integrity_failures_are_sanitized() {
         let sqlite_permission = rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_PERM),
             Some("private SQLite details".to_owned()),
@@ -299,13 +282,8 @@ mod tests {
         assert!(!ApiError::storage(StorageError::Sqlite(sqlite_permission)).retryable);
 
         for result_code in [
-            rusqlite::ffi::SQLITE_CANTOPEN,
-            rusqlite::ffi::SQLITE_IOERR,
+            rusqlite::ffi::SQLITE_INTERRUPT,
             rusqlite::ffi::SQLITE_PROTOCOL,
-            rusqlite::ffi::SQLITE_CANTOPEN_SYMLINK,
-            rusqlite::ffi::SQLITE_IOERR_AUTH,
-            rusqlite::ffi::SQLITE_IOERR_DATA,
-            rusqlite::ffi::SQLITE_IOERR_CORRUPTFS,
         ] {
             let sqlite = rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(result_code),

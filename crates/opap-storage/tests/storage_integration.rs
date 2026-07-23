@@ -98,6 +98,16 @@ fn database_at_schema_version(
             "session_snapshots",
             include_str!("../migrations/0008_session_snapshots.sql"),
         ),
+        (
+            9_i64,
+            "atomic_import_commits",
+            include_str!("../migrations/0009_atomic_import_commits.sql"),
+        ),
+        (
+            10_i64,
+            "import_snapshot_integrity",
+            include_str!("../migrations/0010_import_snapshot_integrity.sql"),
+        ),
     ];
     for (migration_version, name, sql) in migrations.into_iter().take(version) {
         connection.execute_batch(sql)?;
@@ -224,6 +234,7 @@ fn migrates_new_database_and_reopening_is_a_noop() -> TestResult {
             (7, "opaque_import_keys"),
             (8, "session_snapshots"),
             (9, "atomic_import_commits"),
+            (10, "import_snapshot_integrity"),
         ]
     );
     assert!(migrations.iter().all(|item| item.applied_at_ms > 0));
@@ -1927,6 +1938,9 @@ fn v5_redacts_terminal_paths_from_early_v4_databases_before_reprotecting_them() 
          DROP TRIGGER import_history_validate_execution_outcome_code;
          DROP TRIGGER import_history_validate_execution_state;
          DROP TRIGGER import_history_validate_generation_state;
+         DROP TRIGGER import_history_validate_initial_insert;
+         DROP TRIGGER import_history_validate_generation_artifacts;
+         DROP TRIGGER import_session_results_validate_snapshot_insert;
          DROP TABLE import_session_results;
          ALTER TABLE import_history DROP COLUMN execution_token;
          ALTER TABLE import_history DROP COLUMN execution_generation;
@@ -2100,6 +2114,52 @@ fn rejects_weakened_v9_execution_and_result_triggers_on_open() -> TestResult {
 }
 
 #[test]
+fn rejects_weakened_v10_import_and_snapshot_triggers_on_open() -> TestResult {
+    for (trigger, replacement) in [
+        (
+            "import_history_validate_initial_insert",
+            "CREATE TRIGGER import_history_validate_initial_insert
+             BEFORE INSERT ON import_history
+             BEGIN
+                 SELECT RAISE(ABORT, 'weak initial insert guard');
+             END;",
+        ),
+        (
+            "import_history_validate_generation_artifacts",
+            "CREATE TRIGGER import_history_validate_generation_artifacts
+             BEFORE UPDATE ON import_history
+             BEGIN
+                 SELECT RAISE(ABORT, 'weak artifact guard');
+             END;",
+        ),
+        (
+            "import_session_results_validate_snapshot_insert",
+            "CREATE TRIGGER import_session_results_validate_snapshot_insert
+             BEFORE INSERT ON import_session_results
+             BEGIN
+                 SELECT RAISE(ABORT, 'weak snapshot result guard');
+             END;",
+        ),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join(format!("{trigger}.sqlite3"));
+        drop(Database::open(&path)?);
+        let connection = rusqlite::Connection::open(&path)?;
+        connection.execute_batch(&format!("DROP TRIGGER {trigger}; {replacement}"))?;
+        drop(connection);
+
+        let error = Database::open(&path)
+            .err()
+            .expect("weakened v10 critical trigger must be rejected");
+        assert!(
+            matches!(error, StorageError::InvalidSchemaFingerprint(_)),
+            "{trigger} produced {error:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn rejects_v9_trigger_fragments_hidden_in_comments_on_open() -> TestResult {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("comment-bypass.sqlite3");
@@ -2138,15 +2198,15 @@ fn rejects_disagreement_between_user_version_and_migration_history() -> TestResu
     for (case_name, tamper_sql, expected_user, expected_history) in [
         (
             "stale-user-version",
-            "PRAGMA user_version = 8;",
-            8_i64,
+            "PRAGMA user_version = 9;",
             9_i64,
+            10_i64,
         ),
         (
             "missing-history-row",
-            "DELETE FROM schema_migrations WHERE version = 9;",
+            "DELETE FROM schema_migrations WHERE version = 10;",
+            10_i64,
             9_i64,
-            8_i64,
         ),
     ] {
         let directory = tempfile::tempdir()?;

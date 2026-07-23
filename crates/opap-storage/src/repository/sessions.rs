@@ -26,7 +26,7 @@ impl<'connection> Sessions<'connection> {
                  started_at_ms = excluded.started_at_ms,
                  ended_at_ms = excluded.ended_at_ms,
                  timezone_offset_minutes = excluded.timezone_offset_minutes,
-                 updated_at_ms = excluded.updated_at_ms
+                 updated_at_ms = max(sessions.updated_at_ms, excluded.updated_at_ms)
              RETURNING {COLUMNS}"
         );
         Ok(self.connection.query_row(

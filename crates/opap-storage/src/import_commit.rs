@@ -1,12 +1,15 @@
 use crate::replacement::{replace_session_snapshot_on_with_checkpoint, validate_session_snapshot};
-use crate::repository::{Imports, Machines, Profiles, SessionSnapshots, Sessions};
+use crate::repository::{
+    Events, Imports, Machines, Profiles, SessionSnapshots, Sessions, Waveforms,
+};
 use crate::{
     Database, Error, ImportCommitInput, ImportCommitResult, ImportCounts, ImportSessionOutcome,
-    ImportSessionResult, NewMachine, NewSession, Result, Session, SessionProvenanceInput,
+    ImportSessionResult, ImportStatus, NewMachine, NewSession, Result, Session,
+    SessionProvenanceInput, SessionSettingInput, SessionSettingValue, SessionSnapshot,
     is_canonical_execution_token, is_canonical_sha256,
 };
 use rusqlite::{OptionalExtension, params};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 impl Database {
     /// Commits one importer run as a single compare-and-set transaction.
@@ -104,11 +107,16 @@ impl Database {
                 .checked_add(usize_to_i64(waveform_chunks_written)?)
                 .ok_or_else(count_overflow)?;
 
-            transaction.execute(
+            let inserted = transaction.execute(
                 "INSERT INTO import_session_results (import_id, session_id, outcome)
                  VALUES (?1, ?2, ?3)",
                 params![input.import_id, session_id, outcome.as_str(),],
             )?;
+            if inserted != 1 {
+                return Err(Error::Integrity(
+                    "import session result insertion affected no row".to_owned(),
+                ));
+            }
             session_results.push(ImportSessionResult {
                 import_id: input.import_id,
                 session_id,
@@ -172,6 +180,14 @@ impl Database {
             Error::StaleImportExecution {
                 id: input.import_id,
             },
+        )?;
+        verify_final_import_sweep(
+            &transaction,
+            input,
+            machine.id,
+            &history,
+            &counts,
+            &session_results,
         )?;
         checkpoint()?;
         transaction.commit()?;
@@ -379,7 +395,23 @@ fn commit_cas_error(
             id: input.import_id,
         });
     };
-    if input.finished_at_ms < history.updated_at_ms {
+    let lease_is_current = history.profile_id == input.profile_id
+        && history.status == ImportStatus::Running
+        && history.loader_name == input.importer_name
+        && history.source_fingerprint == input.source_fingerprint
+        && history.input_digest == input.input_digest
+        && history.options_digest == input.options_digest
+        && history.execution_token.as_deref() == Some(input.execution_token)
+        && history.execution_generation == input.execution_generation
+        && history.state_message.is_none()
+        && connection.query_row(
+            "SELECT NOT EXISTS (
+                 SELECT 1 FROM import_session_results WHERE import_id = ?1
+             )",
+            [input.import_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+    if lease_is_current && input.finished_at_ms < history.updated_at_ms {
         return Ok(Error::ImportTimestampRegression {
             id: input.import_id,
             previous_at_ms: history.updated_at_ms,
@@ -405,13 +437,209 @@ fn classify_session_outcome(
     {
         return Ok(ImportSessionOutcome::Updated);
     }
-    let Some(provenance) = SessionSnapshots::new(connection).provenance(existing.id)? else {
-        return Ok(ImportSessionOutcome::Updated);
-    };
-    if provenance_matches(&provenance, &imported.snapshot.provenance) {
+    if persisted_session_matches(connection, existing.id, imported)? {
         Ok(ImportSessionOutcome::Unchanged)
     } else {
         Ok(ImportSessionOutcome::Updated)
+    }
+}
+
+fn persisted_session_matches(
+    connection: &rusqlite::Connection,
+    session_id: i64,
+    imported: &crate::ImportSessionSnapshotInput<'_>,
+) -> Result<bool> {
+    let stored_snapshot = match SessionSnapshots::new(connection).get(session_id) {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) | Err(Error::Integrity(_)) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !snapshot_matches(&stored_snapshot, &imported.snapshot) {
+        return Ok(false);
+    }
+
+    let stored_events = Events::new(connection).list_by_session(session_id)?;
+    let stored_events_by_key = stored_events
+        .iter()
+        .map(|event| (event.source_key.as_str(), event))
+        .collect::<HashMap<_, _>>();
+    if stored_events_by_key.len() != stored_events.len()
+        || stored_events.len() != imported.snapshot.data.events.len()
+    {
+        return Ok(false);
+    }
+    for expected in imported.snapshot.data.events {
+        let Some(stored) = stored_events_by_key.get(expected.source_key) else {
+            return Ok(false);
+        };
+        if stored.channel_key != expected.channel_key
+            || stored.event_type != expected.event_type
+            || stored.starts_at_ms != expected.starts_at_ms
+            || stored.duration_ms != expected.duration_ms
+            || stored.value != expected.value
+            || stored.unit.as_deref() != expected.unit
+        {
+            return Ok(false);
+        }
+    }
+
+    let stored_waveforms = Waveforms::new(connection).list_metadata_by_session(session_id)?;
+    let stored_waveforms_by_key = stored_waveforms
+        .iter()
+        .map(|waveform| (waveform.source_key.as_str(), waveform))
+        .collect::<HashMap<_, _>>();
+    if stored_waveforms_by_key.len() != stored_waveforms.len()
+        || stored_waveforms.len() != imported.snapshot.data.waveforms.len()
+    {
+        return Ok(false);
+    }
+    for expected in imported.snapshot.data.waveforms {
+        let Some(stored) = stored_waveforms_by_key.get(expected.source_key) else {
+            return Ok(false);
+        };
+        if stored.channel_key != expected.channel_key
+            || stored.unit.as_deref() != expected.unit
+            || stored.started_at_ms != expected.started_at_ms
+            || stored.sample_interval_us != expected.sample_interval_us
+            || stored.sample_count != expected.sample_count
+            || stored.encoding != expected.encoding
+            || stored.min_value != expected.min_value
+            || stored.max_value != expected.max_value
+        {
+            return Ok(false);
+        }
+        let stored_chunks = Waveforms::new(connection).list_chunks(stored.id)?;
+        let stored_chunks_by_index = stored_chunks
+            .iter()
+            .map(|chunk| (chunk.chunk_index, chunk))
+            .collect::<HashMap<_, _>>();
+        if stored_chunks_by_index.len() != stored_chunks.len()
+            || stored_chunks.len() != expected.chunks.len()
+        {
+            return Ok(false);
+        }
+        for expected_chunk in expected.chunks {
+            let Some(stored_chunk) = stored_chunks_by_index.get(&expected_chunk.chunk_index) else {
+                return Ok(false);
+            };
+            if stored_chunk.start_sample != expected_chunk.start_sample
+                || stored_chunk.sample_count != expected_chunk.sample_count
+                || stored_chunk.payload != expected_chunk.payload
+                || stored_chunk.min_value != expected_chunk.min_value
+                || stored_chunk.max_value != expected_chunk.max_value
+            {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn snapshot_matches(
+    stored: &SessionSnapshot,
+    expected: &crate::SessionSnapshotReplacement<'_>,
+) -> bool {
+    if !provenance_matches(&stored.provenance, &expected.provenance)
+        || stored.summary.usage_ms != expected.summary.usage_ms
+    {
+        return false;
+    }
+
+    let stored_slices_by_sequence = stored
+        .slices
+        .iter()
+        .map(|slice| (slice.sequence, slice))
+        .collect::<HashMap<_, _>>();
+    if stored_slices_by_sequence.len() != stored.slices.len()
+        || stored.slices.len() != expected.slices.len()
+    {
+        return false;
+    }
+    for expected_slice in expected.slices {
+        let Some(stored_slice) = stored_slices_by_sequence.get(&expected_slice.sequence) else {
+            return false;
+        };
+        if stored_slice.source_key != expected_slice.source_key
+            || stored_slice.state != expected_slice.state
+            || stored_slice.started_at_ms != expected_slice.started_at_ms
+            || stored_slice.ended_at_ms != expected_slice.ended_at_ms
+        {
+            return false;
+        }
+    }
+
+    let stored_metrics_by_key = stored
+        .summary
+        .metrics
+        .iter()
+        .map(|metric| (metric.key.as_str(), metric))
+        .collect::<HashMap<_, _>>();
+    if stored_metrics_by_key.len() != stored.summary.metrics.len()
+        || stored.summary.metrics.len() != expected.summary.metrics.len()
+    {
+        return false;
+    }
+    for expected_metric in expected.summary.metrics {
+        let Some(stored_metric) = stored_metrics_by_key.get(expected_metric.key) else {
+            return false;
+        };
+        if stored_metric.value != expected_metric.value
+            || stored_metric.unit.as_deref() != expected_metric.unit
+        {
+            return false;
+        }
+    }
+
+    let stored_settings_by_key = stored
+        .settings
+        .iter()
+        .map(|setting| (setting.key.as_str(), setting))
+        .collect::<HashMap<_, _>>();
+    if stored_settings_by_key.len() != stored.settings.len()
+        || stored.settings.len() != expected.settings.len()
+    {
+        return false;
+    }
+    for expected_setting in expected.settings {
+        let Some(stored_setting) = stored_settings_by_key.get(expected_setting.key) else {
+            return false;
+        };
+        if stored_setting.unit.as_deref() != expected_setting.unit
+            || stored_setting.origin != expected_setting.origin
+            || !setting_value_matches(&stored_setting.value, expected_setting)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn setting_value_matches(stored: &SessionSettingValue, expected: &SessionSettingInput<'_>) -> bool {
+    match stored {
+        SessionSettingValue::Integer(value) => {
+            expected.integer_value == Some(*value)
+                && expected.real_value.is_none()
+                && expected.text_value.is_none()
+                && expected.boolean_value.is_none()
+        }
+        SessionSettingValue::Real(value) => {
+            expected.integer_value.is_none()
+                && expected.real_value == Some(*value)
+                && expected.text_value.is_none()
+                && expected.boolean_value.is_none()
+        }
+        SessionSettingValue::Text(value) => {
+            expected.integer_value.is_none()
+                && expected.real_value.is_none()
+                && expected.text_value == Some(value.as_str())
+                && expected.boolean_value.is_none()
+        }
+        SessionSettingValue::Boolean(value) => {
+            expected.integer_value.is_none()
+                && expected.real_value.is_none()
+                && expected.text_value.is_none()
+                && expected.boolean_value == Some(*value)
+        }
     }
 }
 
@@ -432,6 +660,72 @@ fn provenance_matches(
         && stored.id_algorithm == imported.id_algorithm
         && stored.source_digest == imported.source_digest
         && stored.content_digest == imported.content_digest
+}
+
+fn verify_final_import_sweep(
+    connection: &rusqlite::Connection,
+    input: &ImportCommitInput<'_>,
+    machine_id: i64,
+    history: &crate::ImportHistory,
+    counts: &ImportCounts,
+    expected_results: &[ImportSessionResult],
+) -> Result<()> {
+    if history.status != crate::ImportStatus::Completed
+        || history.profile_id != input.profile_id
+        || history.machine_id != Some(machine_id)
+        || history.loader_name != input.importer_name
+        || history.execution_generation != input.execution_generation
+        || history.execution_token.is_some()
+        || history.sessions_created != counts.sessions_created
+        || history.sessions_updated != counts.sessions_updated
+        || history.events_written != counts.events_written
+        || history.waveform_chunks_written != counts.waveform_chunks_written
+    {
+        return Err(Error::Integrity(
+            "final import history sweep found an inconsistent completion".to_owned(),
+        ));
+    }
+
+    let stored_results = Imports::new(connection).list_session_results(input.import_id)?;
+    let stored_results_by_session = stored_results
+        .iter()
+        .map(|result| (result.session_id, result))
+        .collect::<HashMap<_, _>>();
+    let expected_results_by_session = expected_results
+        .iter()
+        .map(|result| (result.session_id, result))
+        .collect::<HashMap<_, _>>();
+    if stored_results_by_session.len() != stored_results.len()
+        || expected_results_by_session.len() != expected_results.len()
+        || stored_results_by_session.len() != expected_results_by_session.len()
+        || expected_results_by_session
+            .iter()
+            .any(|(session_id, expected)| {
+                stored_results_by_session.get(session_id).copied() != Some(*expected)
+            })
+    {
+        return Err(Error::Integrity(
+            "final import result sweep found inconsistent session links".to_owned(),
+        ));
+    }
+
+    for imported in input.sessions {
+        let Some(session) =
+            Sessions::new(connection).find_by_source_key(machine_id, imported.source_key)?
+        else {
+            return Err(Error::Integrity(
+                "final import sweep found a missing session".to_owned(),
+            ));
+        };
+        if !stored_results_by_session.contains_key(&session.id)
+            || !persisted_session_matches(connection, session.id, imported)?
+        {
+            return Err(Error::Integrity(
+                "final import sweep found an incomplete session snapshot".to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_bounded_text(
