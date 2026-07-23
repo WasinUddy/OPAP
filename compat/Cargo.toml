@@ -14,7 +14,7 @@ publish = false
 opap-channels = { version = "0.1.0", path = "../crates/opap-channels" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["arbitrary_precision"] }
-sha2 = "0.10"
+sha2 = "0.11"
 
 [dev-dependencies]
 jsonschema = { version = "0.18", default-features = false, features = ["draft202012"] }
