@@ -65,6 +65,48 @@ const LOADER_EVENT: Option<EventSemantics> = Some(EventSemantics {
 
 const EXPECTED_CHANNELS: &[ExpectedChannel] = &[
     expected_channel!(
+        "oximetry.series.oxygen_saturation",
+        "Oxygen saturation",
+        ChannelKind::SampledSeries,
+        Unit::Percent,
+        0x1801,
+        "OXI_SPO2",
+        "SPO2",
+        "SpO2 %",
+        "SpO2",
+        "%",
+        &[
+            (ResmedFileKind::Sad, &["SpO2", "SpO2.1s"]),
+            (ResmedFileKind::Sa2, &["SpO2", "SpO2.1s"])
+        ],
+        None,
+        None
+    ),
+    expected_channel!(
+        "oximetry.series.pulse_rate",
+        "Pulse rate",
+        ChannelKind::SampledSeries,
+        Unit::BeatsPerMinute,
+        0x1800,
+        "OXI_Pulse",
+        "Pulse",
+        "Pulse Rate",
+        "Pulse Rate",
+        "bpm",
+        &[
+            (
+                ResmedFileKind::Sad,
+                &["Pulse", "Puls", "Pouls", "Pols", "Pulse.1s", "Nabiz"]
+            ),
+            (
+                ResmedFileKind::Sa2,
+                &["Pulse", "Puls", "Pouls", "Pols", "Pulse.1s", "Nabiz"]
+            )
+        ],
+        None,
+        None
+    ),
+    expected_channel!(
         "pap.event.clear_airway",
         "Clear airway",
         ChannelKind::Event,
@@ -1120,6 +1162,28 @@ fn exhaustive_registry_matches_pinned_source_metadata_snapshot() {
         for (signal, (file, aliases)) in channel.resmed_signals.iter().zip(expected.signals) {
             assert_eq!(signal.file, *file, "{}", expected.key);
             assert_eq!(signal.aliases, *aliases, "{}", expected.key);
+        }
+    }
+}
+
+#[test]
+fn resmed_sad_and_sa2_aliases_match_the_shared_loader_path() {
+    let pulse = by_legacy_numeric_id(0x1800).expect("OSCAR pulse channel");
+    assert_eq!(pulse.key.as_str(), "oximetry.series.pulse_rate");
+    assert_eq!(pulse.kind, ChannelKind::SampledSeries);
+    assert_eq!(pulse.unit, Unit::BeatsPerMinute);
+
+    let oxygen = by_legacy_numeric_id(0x1801).expect("OSCAR SpO2 channel");
+    assert_eq!(oxygen.key.as_str(), "oximetry.series.oxygen_saturation");
+    assert_eq!(oxygen.kind, ChannelKind::SampledSeries);
+    assert_eq!(oxygen.unit, Unit::Percent);
+
+    for file in [ResmedFileKind::Sad, ResmedFileKind::Sa2] {
+        for alias in ["Pulse", "Puls", "Pouls", "Pols", "Pulse.1s", "Nabiz"] {
+            assert_eq!(resmed_signal(file, alias), Some(pulse), "{file:?} {alias}");
+        }
+        for alias in ["SpO2", "SpO2.1s"] {
+            assert_eq!(resmed_signal(file, alias), Some(oxygen), "{file:?} {alias}");
         }
     }
 }

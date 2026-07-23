@@ -48,6 +48,60 @@ const RESMED_CSL_CSR_SPAN: SpanSemantics = SpanSemantics {
 /// provenance, invariant tests, and a stable-key compatibility decision.
 pub static CHANNELS: &[ChannelDefinition] = &[
     ChannelDefinition {
+        key: StableChannelKey::new("oximetry.series.oxygen_saturation"),
+        label: "Oxygen saturation",
+        kind: ChannelKind::SampledSeries,
+        unit: Unit::Percent,
+        legacy_oscar: LegacyOscarMetadata {
+            id: LegacyOscarChannelId(0x1801),
+            cpp_symbol: "OXI_SPO2",
+            lookup_code: "SPO2",
+            english_label: "SpO2 %",
+            short_label: "SpO2",
+            unit_label: "%",
+        },
+        resmed_signals: &[
+            ResmedSignalDescriptor {
+                file: ResmedFileKind::Sad,
+                aliases: &["SpO2", "SpO2.1s"],
+            },
+            ResmedSignalDescriptor {
+                file: ResmedFileKind::Sa2,
+                aliases: &["SpO2", "SpO2.1s"],
+            },
+        ],
+        event_semantics: None,
+        span_semantics: None,
+        analytics_role: None,
+    },
+    ChannelDefinition {
+        key: StableChannelKey::new("oximetry.series.pulse_rate"),
+        label: "Pulse rate",
+        kind: ChannelKind::SampledSeries,
+        unit: Unit::BeatsPerMinute,
+        legacy_oscar: LegacyOscarMetadata {
+            id: LegacyOscarChannelId(0x1800),
+            cpp_symbol: "OXI_Pulse",
+            lookup_code: "Pulse",
+            english_label: "Pulse Rate",
+            short_label: "Pulse Rate",
+            unit_label: "bpm",
+        },
+        resmed_signals: &[
+            ResmedSignalDescriptor {
+                file: ResmedFileKind::Sad,
+                aliases: &["Pulse", "Puls", "Pouls", "Pols", "Pulse.1s", "Nabiz"],
+            },
+            ResmedSignalDescriptor {
+                file: ResmedFileKind::Sa2,
+                aliases: &["Pulse", "Puls", "Pouls", "Pols", "Pulse.1s", "Nabiz"],
+            },
+        ],
+        event_semantics: None,
+        span_semantics: None,
+        analytics_role: None,
+    },
+    ChannelDefinition {
         key: StableChannelKey::new("pap.event.clear_airway"),
         label: "Clear airway",
         kind: ChannelKind::Event,

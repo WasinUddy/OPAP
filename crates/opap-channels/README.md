@@ -6,10 +6,13 @@ Its legacy metadata and ResMed alias evidence are pinned to OSCAR-code commit
 `64c5e90a26f91fb15868bcfcccde0c1e1522ac86`.
 
 The durable identity of a channel is a stable string such as
-`pap.event.obstructive_apnea` or `pap.series.leak_rate`. OSCAR numeric
-`ChannelID` values are exposed only through the visibly named
-`LegacyOscarChannelId` compatibility type. New OPAP code must not persist an
-OSCAR number as its only channel identity.
+`pap.event.obstructive_apnea`, `pap.series.leak_rate`, or
+`oximetry.series.oxygen_saturation`. OSCAR numeric `ChannelID` values are
+exposed only through the visibly named `LegacyOscarChannelId` compatibility
+type. New OPAP code must not persist an OSCAR number as its only channel
+identity. Oximetry uses its own durable namespace because pulse and oxygen
+saturation are not PAP measurements, even when they arrive beside ResMed PAP
+data.
 
 ```rust
 use opap_channels::{
@@ -38,6 +41,8 @@ The registry includes:
 - PLD signals that the pinned loader actually persists;
 - the CSL `CSR Start`/`CSR End` pair used to build Cheyne Stokes respiration
   spans;
+- pulse-rate and oxygen-saturation signals from the equivalent ResMed SAD and
+  SA2 oximetry paths;
 - foundational STR pressure, ramp, mode, EPR, climate, comfort, and bilevel
   settings persisted by `StoreSettings`; and
 - OSCAR's device-reported apnea compatibility channel plus pressure/leak roles
@@ -51,9 +56,11 @@ OSCAR's label-starts-with-alias direction and case-insensitive comparison. That
 resolver also fails closed when aliases from multiple channels match.
 File-family scope is part of an alias identity: for example, `Mask Pres` means
 the high-rate mask-pressure channel in BRP and the regular mask-pressure channel
-in PLD. STR-only setting labels do not resolve as PLD, EVE, or CSL data.
-OSCAR's shared translation table is an explicit exception: the IPAP/EPAP
-`S.BL.*` and `S.S.*` aliases are accepted by both PLD and STR dispatch.
+in PLD. STR-only setting labels do not resolve as PLD, EVE, or CSL data. SAD
+and SA2 remain distinct provenance kinds even though the pinned loader sends
+both through the same oximetry decoder and translation rows. OSCAR's shared
+translation table is an explicit exception: the IPAP/EPAP `S.BL.*` and `S.S.*`
+aliases are accepted by both PLD and STR dispatch.
 
 Some pinned setting metadata is deliberately alias-free. `S.PtAccess` becomes
 either the S9/10 patient-access setting or the AirSense/AirCurve 11 patient-view
@@ -86,10 +93,10 @@ an exact registry snapshot is required.
 
 ## Deliberate omissions
 
-- SAD/SA2 oximetry, STR summary statistics, machine identity, summary-only
-  channels, and other device families remain outside this scope. Clear-airway
-  events come from EVE annotations; CSL carries CSR spans and is not a source
-  for clear-airway events.
+- STR summary statistics, machine identity, summary-only channels, oximetry
+  signals beyond SAD/SA2 pulse and SpO2, and other device families remain
+  outside this scope. Clear-airway events come from EVE annotations; CSL
+  carries CSR spans and is not a source for clear-airway events.
 - The pinned loader declares `RMAS1x_EasyBreathe` and can store it, but never
   assigns it a `ChannelID`. This registry does not manufacture the apparent
   missing `0xe211` value. `RMS9_TubeType` is also unregistered and not persisted

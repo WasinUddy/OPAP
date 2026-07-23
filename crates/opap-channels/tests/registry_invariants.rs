@@ -35,7 +35,10 @@ fn stable_keys_and_legacy_ids_are_unique() {
             channel.legacy_oscar.lookup_code
         );
 
-        assert!(key.starts_with("pap."), "unexpected key namespace: {key}");
+        assert!(
+            key.starts_with("pap.") || key.starts_with("oximetry."),
+            "unexpected key namespace: {key}"
+        );
         assert!(
             key.bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte == b'_' || byte == b'.'),
@@ -125,6 +128,31 @@ fn aliases_are_unique_within_a_file_family() {
 }
 
 #[test]
+fn sad_and_sa2_oximetry_mappings_are_equivalent_but_file_scoped() {
+    let pulse = by_stable_key("oximetry.series.pulse_rate").expect("pulse channel");
+    let oxygen =
+        by_stable_key("oximetry.series.oxygen_saturation").expect("oxygen saturation channel");
+
+    assert_eq!(pulse.unit, Unit::BeatsPerMinute);
+    assert_eq!(pulse.unit.symbol(), "bpm");
+    assert_eq!(oxygen.unit, Unit::Percent);
+
+    for file in [ResmedFileKind::Sad, ResmedFileKind::Sa2] {
+        for alias in ["Pulse", "Puls", "Pouls", "Pols", "Pulse.1s", "Nabiz"] {
+            assert_eq!(resmed_signal(file, alias), Some(pulse), "{file:?} {alias}");
+        }
+        for alias in ["SpO2", "SpO2.1s"] {
+            assert_eq!(resmed_signal(file, alias), Some(oxygen), "{file:?} {alias}");
+        }
+    }
+
+    assert_eq!(resmed_signal(ResmedFileKind::Sad, "pulse"), None);
+    assert_eq!(resmed_signal(ResmedFileKind::Sa2, "SpO2.1s extra"), None);
+    assert_eq!(resmed_signal(ResmedFileKind::Pld, "Pulse"), None);
+    assert_eq!(resmed_signal(ResmedFileKind::Brp, "SpO2"), None);
+}
+
+#[test]
 fn source_coverage_allows_only_settings_and_one_analytics_exception_without_aliases() {
     let without_resmed_aliases: Vec<_> = CHANNELS
         .iter()
@@ -198,6 +226,27 @@ fn prefix_lookup_matches_oscar_case_and_cropped_alias_policy() {
     assert_eq!(
         resmed_signal_prefix(ResmedFileKind::Str, "s.bl.ipap diagnostic suffix"),
         Some(ipap)
+    );
+
+    let pulse = by_stable_key("oximetry.series.pulse_rate").expect("pulse channel");
+    assert_eq!(
+        resmed_signal_prefix(ResmedFileKind::Sad, "POULS waveform"),
+        Some(pulse)
+    );
+    assert_eq!(
+        resmed_signal_prefix(ResmedFileKind::Sa2, "PULSE.1S waveform"),
+        Some(pulse)
+    );
+
+    let oxygen =
+        by_stable_key("oximetry.series.oxygen_saturation").expect("oxygen saturation channel");
+    assert_eq!(
+        resmed_signal_prefix(ResmedFileKind::Sad, "SPO2.1S waveform"),
+        Some(oxygen)
+    );
+    assert_eq!(
+        resmed_signal_prefix(ResmedFileKind::Sa2, "spo2 waveform"),
+        Some(oxygen)
     );
 }
 

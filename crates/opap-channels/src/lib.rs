@@ -15,9 +15,9 @@
 //! the primary identity of an OPAP channel.
 //!
 //! The registry is intentionally explicit. It covers channels directly used by
-//! OSCAR's pinned `ResMed` EVE/BRP/PLD/CSL paths, foundational STR settings,
-//! and the event, pressure, and leak inputs used by OPAP analytics. It does not
-//! guess unsupported signals, clinical thresholds, or diagnoses.
+//! OSCAR's pinned `ResMed` EVE/BRP/PLD/CSL/SAD/SA2 paths, foundational STR
+//! settings, and the event, pressure, and leak inputs used by OPAP analytics.
+//! It does not guess unsupported signals, clinical thresholds, or diagnoses.
 //!
 //! Event channels require special care: [`Unit::EventsPerHour`] describes the
 //! summary/display unit. A `ResMed` EVE record's stored value is the source EDF

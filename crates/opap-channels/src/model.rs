@@ -88,6 +88,8 @@ pub enum ChannelKind {
 pub enum Unit {
     /// Count of occurrences divided by active therapy hours.
     EventsPerHour,
+    /// Heart beats per minute.
+    BeatsPerMinute,
     /// Litres per minute.
     LitersPerMinute,
     /// Centimetres of water pressure.
@@ -120,6 +122,7 @@ impl Unit {
     pub const fn symbol(self) -> &'static str {
         match self {
             Self::EventsPerHour => "events/h",
+            Self::BeatsPerMinute => "bpm",
             Self::LitersPerMinute => "L/min",
             Self::CentimetersOfWater => "cmH2O",
             Self::Milliliters => "mL",
@@ -150,6 +153,10 @@ pub enum ResmedFileKind {
     Csl,
     /// Daily summary and machine settings (`STR.edf`).
     Str,
+    /// Oximetry detail (`*_SAD.edf`).
+    Sad,
+    /// Oximetry detail (`*_SA2.edf`).
+    Sa2,
 }
 
 /// How a `ResMed` EVE event timestamp is represented.

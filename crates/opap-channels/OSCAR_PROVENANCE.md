@@ -23,6 +23,7 @@ OSCAR executable fixture or an end-to-end compatibility claim.
 | Generic PAP mode ID, labels, and unit | [`schema.cpp` lines 311–324](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/schema.cpp#L311-324) |
 | Common waveform IDs, labels, schema kinds, and units | [`schema.cpp` lines 230–278](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/schema.cpp#L230-278) |
 | Exact lookup-code constants used by the waveform declarations | [`common_gui.h` lines 16–32](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/common_gui.h#L16-32) |
+| Pulse and SpO2 IDs, lookup codes, labels, schema kinds, and units | [`schema.cpp` lines 211–216](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/schema.cpp#L211-216), [`common_gui.h` lines 48–49](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/common_gui.h#L48-49) |
 | Exact default English unit strings | [`common.cpp` lines 744–770](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/common.cpp#L744-770) |
 | Five AHI-contributing legacy channels | [`schema.cpp` lines 413–424](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/schema.cpp#L413-424) |
 | RERA is added to the AHI channel count for RDI | [`day.h` lines 251–262](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/day.h#L251-262) |
@@ -33,19 +34,25 @@ OSCAR executable fixture or an end-to-end compatibility claim.
 | `AlvMinVent.2s`, `CLRatio.2s`, and `TRRatio.2s` are explicitly skipped | [`resmed_loader.cpp` lines 3674–3681](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/loader_plugins/resmed_loader.cpp#L3674-3681) |
 | OSCAR's permissive case-insensitive prefix matcher | [`resmed_loader.cpp` lines 3940–3955](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/loader_plugins/resmed_loader.cpp#L3940-3955) |
 | Exact EVE/BRP/PLD signal-alias table | [`resmed_loader.cpp` lines 3957–4015](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/loader_plugins/resmed_loader.cpp#L3957-4015) |
+| SAD and SA2 use the shared oximetry loader | [`resmed_loader.cpp` lines 2330–2341](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/loader_plugins/resmed_loader.cpp#L2330-2341), [`resmed_loader.cpp` lines 2934–2936](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/loader_plugins/resmed_loader.cpp#L2934-2936) |
+| SAD/SA2 pulse and SpO2 dispatch, plus their exact aliases | [`resmed_loader.cpp` lines 3432–3501](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/loader_plugins/resmed_loader.cpp#L3432-3501), [`resmed_loader.cpp` lines 4002–4003](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/loader_plugins/resmed_loader.cpp#L4002-4003) |
 | CSL carries CSR start/end spans rather than clear-airway events | [`resmed_loader.cpp` lines 3144–3211](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/loader_plugins/resmed_loader.cpp#L3144-3211) |
 | ResMed-specific RMS9/RMAS1x setting IDs, labels, and units | [`resmed_loader.cpp` lines 123–288](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/loader_plugins/resmed_loader.cpp#L123-288) |
 | STR mode, pressure, ramp, EPR, climate, and bilevel setting labels | [`resmed_loader.cpp` lines 1549–2086](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/loader_plugins/resmed_loader.cpp#L1549-2086) |
 | STR values persisted as session settings | [`resmed_loader.cpp` lines 2576–2695](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/SleepLib/loader_plugins/resmed_loader.cpp#L2576-2695) |
 | Legacy `RMS9_SetPressure` ID and labels | [`channels.xml` lines 14–16](https://gitlab.com/CrimsonNape/OSCAR-code/-/blob/64c5e90a26f91fb15868bcfcccde0c1e1522ac86/oscar/docs/channels.xml#L14-16) |
 
-Every one of the 58 registry entries was rechecked against those declarations,
+Every one of the 60 registry entries was rechecked against those declarations,
 unit constants, loader branches, and alias rows at the pinned revision.
 
 ## Compatibility boundaries
 
 - OPAP stable keys are new names and are **not** OSCAR lookup codes. The exact
   OSCAR lookup code remains separately available in `legacy_oscar.lookup_code`.
+- Pulse and oxygen saturation use the `oximetry.series.*` durable namespace
+  because they are oximeter measurements rather than PAP channels. SAD and SA2
+  stay distinct file kinds for provenance even though the pinned loader sends
+  both through the same decoder and alias table.
 - `resmed_signal` is a canonical metadata resolver, not a byte-for-byte port of
   `matchSignal`: it deliberately requires an exact case-sensitive alias and
   returns no result on ambiguity. The alias rows are source-derived; the lookup
@@ -89,8 +96,8 @@ unit constants, loader branches, and alias rows at the pinned revision.
   a `ChannelID` at this revision. OPAP does not infer that the unused `0xe211`
   gap belongs to it.
 
-SAD/SA2 oximetry, STR summary statistics, machine identity, summary-only
-channels, and other device families remain outside this crate's scope. No
-source EDF fixture or loader result is bundled here, so this crate claims
-metadata-level source fidelity only. End-to-end parity requires anonymized or
-synthetic EDF fixtures exercised through the importer.
+STR summary statistics, machine identity, summary-only channels, oximetry
+signals beyond SAD/SA2 pulse and SpO2, and other device families remain outside
+this crate's scope. No source EDF fixture or loader result is bundled here, so
+this crate claims metadata-level source fidelity only. End-to-end parity
+requires anonymized or synthetic EDF fixtures exercised through the importer.

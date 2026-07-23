@@ -2183,6 +2183,8 @@ fn resmed_file_kind_name(kind: ResmedFileKind) -> &'static str {
         ResmedFileKind::Pld => "pld",
         ResmedFileKind::Csl => "csl",
         ResmedFileKind::Str => "str",
+        ResmedFileKind::Sad => "sad",
+        ResmedFileKind::Sa2 => "sa2",
     }
 }
 
@@ -3120,6 +3122,8 @@ mod tests {
         assert_eq!(resmed_file_kind_name(ResmedFileKind::Pld), "pld");
         assert_eq!(resmed_file_kind_name(ResmedFileKind::Csl), "csl");
         assert_eq!(resmed_file_kind_name(ResmedFileKind::Str), "str");
+        assert_eq!(resmed_file_kind_name(ResmedFileKind::Sad), "sad");
+        assert_eq!(resmed_file_kind_name(ResmedFileKind::Sa2), "sa2");
     }
 
     #[derive(Deserialize)]
