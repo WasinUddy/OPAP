@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 /**
- * Renderer-facing DTOs for `opap-service` API schema version 1.
+ * Renderer-facing DTOs for `opap-service` API schema version 2.
  *
  * Property names intentionally match the Rust/Serde wire format exactly. Keep
  * this file in lockstep with `crates/opap-service/src/api.rs` and

@@ -16,12 +16,12 @@ The repository contains tested foundations, not a user-ready CPAP application:
 
 | Area | What works now | Important limit |
 | --- | --- | --- |
-| ResMed source handling | Bounded card inventory, card detection, and machine identification from `Identification.tgt` or `Identification.json` | Session import deliberately returns `UnsupportedOperation` |
-| EDF/EDF+ | A safe, allocation-bounded parser for headers, samples, calibration, and TAL annotations | It is not connected to the ResMed session importer |
+| ResMed source handling | Bounded card inventory, card detection, machine identification, and a heuristic DATALOG candidate index | Detection does not parse STR records or establish import readiness; session import deliberately returns `UnsupportedOperation` |
+| EDF/EDF+ | A safe, allocation-bounded parser for headers, samples, calibration, and TAL annotations; candidate indexing reads bounded headers | Clinical signals are not imported, and deliberate safety/spec corrections mean parser behavior is not universally identical to OSCAR |
 | Local storage | Versioned SQLite migrations and repositories for profiles, machines, sessions, events, waveforms, chunks, and import history | No end-to-end importer populates a user profile |
-| Desktop UI | Responsive Mantine Overview, Daily, Import, and Settings/About preview screens | All therapy values and the import flow are fabricated; settings are not saved |
-| Native/application boundaries | Experimental Tauri host and framework-neutral service APIs for bootstrap, profile/source inspection, and blocked import jobs | They are stand-alone foundations and are not wired into the preview UI |
-| Compatibility tests | Synthetic unit/integration tests, ResMed identification Cucumber scenarios, and an opt-in private conformance layout | No session-level OSCAR golden parity suite exists yet |
+| Desktop UI | Responsive Mantine Overview, Daily, Import, and Settings/About screens with an explicit browser-demo adapter and a typed native adapter | Therapy views still contain fabricated sample values; no session importer populates them |
+| Native/application boundaries | A thin Tauri host delegates bootstrap, profile/source inspection, and blocked import-job workflows to the framework-neutral service | Real source inspection is local and path-opaque, but session import remains unavailable |
+| Compatibility tests | Synthetic unit/integration tests, ResMed identification Cucumber scenarios, and an opt-in private conformance layout | A canonical full-session oracle comparison and golden suite remain planned |
 
 See the [architecture and integration status](docs/architecture.md), the
 [OSCAR port map](PORTING.md), and the [roadmap](docs/roadmap.md) for the exact
@@ -40,6 +40,44 @@ pnpm dev
 
 Open <http://localhost:5173>. This preview does not open a device folder, read a
 CPAP card, write SQLite data, or make medical calculations.
+
+## Run the native developer host
+
+Install the platform packages listed in the
+[Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/), then use the
+repository-pinned Tauri CLI; no global CLI installation is needed:
+
+```sh
+pnpm --dir apps/desktop install --frozen-lockfile
+pnpm --dir apps/desktop run tauri:dev
+```
+
+For a non-interactive compile check matching CI, build the host without an
+installer or application bundle. The default script uses an optimized Rust
+profile; append `:debug` for the faster CI-equivalent profile:
+
+```sh
+pnpm --dir apps/desktop run tauri:build
+pnpm --dir apps/desktop run tauri:build:debug
+```
+
+`pnpm --dir apps/desktop run tauri:bundle` asks the platform packaging tools for
+an **unsigned local developer bundle**. Its configuration uses the checked-in
+PNG, macOS ICNS, and Windows ICO artwork and points installer packaging at the
+GPLv3 license text, but the result is not a signed, notarized, or supported
+production release. Before redistribution, verify that the complete license is
+physically present in the artifact; installer license metadata alone does not
+place it inside every application format. CI only compiles the native host on
+macOS with `--no-bundle`; it does not publish an installer.
+
+For an attributable build, set `OPAP_BUILD_REVISION` and
+`VITE_OPAP_SOURCE_REVISION` to the same exact 7–40 digit Git revision before
+running the command. When either value is absent or invalid, the corresponding
+About/source link stays unavailable instead of claiming unverifiable provenance.
+
+Windows builds also still rely on inherited application-data ACLs. Explicit
+private DACL, hard-link, and reparse-point enforcement is a release blocker
+before OPAP can claim the same local-database hardening it applies on Unix.
 
 ## Inspect a ResMed card identity
 
@@ -80,18 +118,43 @@ pnpm --dir apps/desktop test:unit
 pnpm --dir apps/desktop build
 ```
 
-The application service and Tauri host currently remain stand-alone crates, so
-check them explicitly when changing their code:
+The application service is part of the root workspace. The Tauri host retains a
+stand-alone lockfile, so check it explicitly when changing native code or its
+dependencies:
 
 ```sh
-cargo test --manifest-path crates/opap-service/Cargo.toml --locked
+cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --all-targets --all-features -- -D warnings
 cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+pnpm --dir apps/desktop run tauri:build:debug
 ```
 
-The Cucumber suite covers ResMed detection and identification only. Private or
-approved anonymized compatibility cards use the ignored layout documented in
-[`compat/README.md`](compat/README.md); never add real patient card contents to
-Git.
+The Cucumber suite covers ResMed detection/identification and blocked
+application-service workflows; it does not execute a therapy-session import.
+Private or approved anonymized compatibility cards use the ignored layout
+documented in [`compat/README.md`](compat/README.md); never add real patient card
+contents to Git.
+
+## OSCAR compatibility scope
+
+The behavioral oracle is
+[`CrimsonNape/OSCAR-code`](https://gitlab.com/CrimsonNape/OSCAR-code) commit
+`64c5e90a26f91fb15868bcfcccde0c1e1522ac86`, recorded in
+[`compat/oscar-code-revision.txt`](compat/oscar-code-revision.txt). The relevant
+ResMed/EDF loader files at that revision are byte-identical to OSCAR 1.7.2
+commit `c5c7890785b196993c7c67966f024c32929ec5ab`.
+
+Compatibility is intentionally narrower than “OSCAR rewritten.” OPAP corrects
+OSCAR's derived JSON family-name truncation, excludes `RMVENT_*` definitions
+that exist only in OSCAR-SQL, and applies explicit safety guards to EDF and
+analytics behavior. The current session-candidate index is a pre-import
+heuristic without OSCAR's STR mask-on/mask-off seeding. Compressed EDF, AEV, and
+unknown DATALOG suffixes can be grouped as candidates, but their payloads,
+machine type/settings, events, waveforms, and oximetry remain unsupported.
+Analytics also omits OSCAR's CPAP-machine-type filter and uses a bounded form
+of OSCAR's day-style duration-weighted percentile calculation. See the
+[port map](PORTING.md) for exact deviations; no full-session parity claim is
+made.
 
 ## Project principles
 
@@ -130,9 +193,9 @@ OPAP is a GPLv3 derivative of OSCAR and SleepyHead. Portions are based on the
 free and open-source software SleepyHead, developed and copyrighted by Mark
 Watkins, 2011–2018. Portions of OSCAR are copyright the OSCAR Team.
 
-The pinned OSCAR-SQL revision and translated behavior are recorded in
+The pinned OSCAR-code revision and translated behavior are recorded in
 [PORTING.md](PORTING.md) and
-[`compat/oscar-sql-revision.txt`](compat/oscar-sql-revision.txt). All
+[`compat/oscar-code-revision.txt`](compat/oscar-code-revision.txt). All
 redistributed builds must preserve the GNU GPL version 3 license, corresponding
 source availability, applicable notices, and upstream attribution. See
 [COPYING](COPYING) and the

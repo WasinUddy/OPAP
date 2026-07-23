@@ -22,7 +22,8 @@ vendor code or documentation.
 ## Set up the repository
 
 Install Rust stable with `rustfmt` and Clippy, plus Node.js 22 and pnpm 11.15.1
-for frontend work. Then run:
+for frontend work. Native-host changes also need the platform packages from the
+[Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/). Then run:
 
 ```sh
 cargo test --workspace --all-targets --all-features --locked
@@ -30,8 +31,8 @@ pnpm --dir apps/desktop install --frozen-lockfile
 pnpm --dir apps/desktop test:unit
 ```
 
-The complete commands, including stand-alone service and Tauri checks, are in
-the [development setup](README.md#development-setup).
+The complete commands, including the stand-alone Tauri checks, are in the
+[development setup](README.md#development-setup).
 
 ## Design and implementation rules
 
@@ -53,12 +54,21 @@ the [development setup](README.md#development-setup).
 
 ### OSCAR compatibility work
 
-- Use the revision in `compat/oscar-sql-revision.txt` as the behavioral oracle.
+- Use the OSCAR-code revision in `compat/oscar-code-revision.txt` as the
+  behavioral oracle. Do not silently substitute OSCAR-SQL behavior; its
+  SQL-only `RMVENT_*` definitions are outside the pinned compatibility set.
 - Record the upstream subsystem and material deviations in [PORTING.md](PORTING.md)
   when translating behavior.
 - Add focused synthetic tests for each branch. Session-level ports also require
   a versioned compatibility manifest and exact comparisons or documented
   field-specific tolerances.
+- Label safety corrections and intentionally stricter behavior as deviations,
+  not parity. Current examples include robust derived JSON family recognition,
+  bounded EDF parsing, and guarded analytics edge cases.
+- Do not present the DATALOG candidate index as an imported session or OSCAR
+  session parity. It lacks STR mask-on/mask-off seeding; compressed EDF, AEV,
+  and unknown DATALOG suffixes may be grouped as candidates, but their payloads
+  are not decoded or imported.
 - Do not treat OSCAR's existing YAML generator as a complete oracle: its public
   checkout has no patient fixture corpus, it truncates long arrays, and some
   timestamps depend on the host timezone.
@@ -110,7 +120,27 @@ pnpm --dir apps/desktop build
 ```
 
 Also run the relevant stand-alone manifest tests when changing
-`crates/opap-service` or `apps/desktop/src-tauri`.
+`apps/desktop/src-tauri`:
+
+```sh
+cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --all-targets --all-features -- -D warnings
+cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --all-targets --all-features
+pnpm --dir apps/desktop run tauri:build:debug
+```
+
+The last command uses the exact Tauri CLI in `pnpm-lock.yaml` and deliberately
+skips bundling. `pnpm --dir apps/desktop run tauri:bundle` requests an unsigned
+local developer bundle, not a production or release-signing workflow. Preserve
+the checked-in PNG/ICNS/ICO assets and verify the complete GPLv3 text is
+physically included in every redistributed artifact; installer `licenseFile`
+metadata alone is insufficient. Windows privacy hardening remains incomplete
+until private ACL, hard-link, and reparse-point behavior is implemented and
+exercised on a Windows CI runner.
+
+Any build intended for redistribution must compile the native and renderer
+About metadata from the same reviewed revision by setting
+`OPAP_BUILD_REVISION` and `VITE_OPAP_SOURCE_REVISION` to that exact Git hash.
 
 ## Fixtures and privacy
 

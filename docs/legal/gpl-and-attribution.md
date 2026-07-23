@@ -23,8 +23,10 @@ project and incorporated source.
 
 - Modified or translated OSCAR logic remains GPL-covered. Rewriting C++ into
   Rust does not by itself remove GPL obligations.
-- Each ported module SHOULD record the upstream project, file or subsystem,
-  pinned revision from `compat/oscar-sql-revision.txt`, and material deviations.
+- Each ported module SHOULD record the upstream OSCAR-code project, file or
+  subsystem, pinned revision from `compat/oscar-code-revision.txt`, and material
+  deviations. OSCAR-SQL is a separate fork and is not OPAP's provenance
+  baseline.
 - Release source MUST include build scripts, interface definitions, dependency
   lockfiles, and other Corresponding Source required to rebuild the shipped
   binaries, subject to GPLv3.

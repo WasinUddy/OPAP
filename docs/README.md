@@ -12,6 +12,7 @@ HIPAA-covered entity. Treat them accordingly.
 ## Decisions and policies
 
 - [Architecture and integration status](architecture.md)
+- [OSCAR port map and compatibility boundaries](../PORTING.md)
 - [ADR 0001: local-first health-data architecture](adr/0001-local-first-health-data.md)
 - [Threat model](security/threat-model.md)
 - [Test-fixture anonymization policy](security/fixture-anonymization.md)

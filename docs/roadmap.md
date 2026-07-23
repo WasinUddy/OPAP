@@ -9,23 +9,26 @@ conformance data remains outside Git.
 No milestone below is complete yet, and there is no supported desktop release.
 The current repository has:
 
-- the Rust workspace, pinned OSCAR-SQL provenance, GPL/privacy policies, and CI;
-- bounded ResMed card detection and machine identification, but no session
-  importer;
-- an independent hardened EDF/EDF+ parser that is not yet connected to ResMed
-  sessions;
+- the Rust workspace, pinned OSCAR-code provenance, GPL/privacy policies, and CI;
+- bounded ResMed card detection, machine identification, and pre-import DATALOG
+  candidate indexing, but no STR-seeded session importer;
+- an independent hardened EDF/EDF+ parser used for bounded candidate-header
+  inspection, but not for importing clinical signals;
+- selected channel metadata and pure analytics helpers with documented
+  fail-closed/checked differences, but no imported data pipeline or
+  full-session OSCAR goldens;
 - versioned transactional SQLite storage without an end-to-end clinical import;
 - a responsive Mantine interface populated only by clearly labeled fabricated
   data; and
-- experimental service and Tauri boundaries that are not connected to that UI
-  and cannot execute session imports.
+- experimental service, native-host, and renderer boundaries that cannot
+  execute session imports; browser preview therapy data remains fabricated.
 
 The present wiring and missing links are detailed in
 [Architecture and integration status](architecture.md).
 
 ## 0. Foundation
 
-Establish the Rust workspace, pinned OSCAR-SQL baseline, GPL notices, CI, and
+Establish the Rust workspace, pinned OSCAR-code baseline, GPL notices, CI, and
 local-first policies.
 
 Gate: formatting, linting, unit tests, dependency/license checks, and a clean
@@ -38,6 +41,11 @@ settings, events, summaries, and signals. Generate golden results through the
 pinned OSCAR C++ baseline, normalize both implementations, and compare exact
 fields or documented per-field floating-point tolerances.
 
+A schema/comparator alone will not satisfy this milestone's gate: OPAP
+currently has no full-session oracle output or golden corpus. Intentional
+differences, including robust JSON family derivation and guarded EDF/analytics
+behavior, must be explicit manifest expectations rather than normalized away.
+
 Gate: synthetic fixtures run in CI; private fixtures run locally when configured;
 golden updates require an explained review; repeated runs are deterministic.
 
@@ -47,6 +55,13 @@ Port detection, machine identity, EDF/session parsing, settings, respiratory
 events, waveforms, summaries, timezone handling, and duplicate detection into
 safe Rust slices. Keep parsers independent from UI and storage so pure portions
 can later target WASM.
+
+The present candidate index is only a bounded heuristic: it is not seeded from
+STR mask-on/mask-off records. Compressed EDF, AEV, and unknown DATALOG suffixes
+may be grouped as candidates, but their payloads are not decoded or imported.
+Machine type/settings, oximetry, and clinical signal decoding remain in this
+milestone. CSL is Cheyne-Stokes respiration (CSR) annotation data, not a
+central-apnea channel.
 
 Gate: malformed-input unit and fuzz tests pass; differential results match the
 OSCAR baseline; importing the same card twice is idempotent; cancellation or a
